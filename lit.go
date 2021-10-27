@@ -9,8 +9,8 @@ import (
 
 var (
 	VarUndef    Var   = Var(-1)
+	LitUndef    Lit   = Lit(-1)
 	ErrLitError error = errors.New("Literal error")
-	ErrLitUndef error = errors.New("Literal undef")
 )
 
 type Var int64
@@ -18,6 +18,9 @@ type Var int64
 type Lit int64
 
 func (p Lit) String() string {
+	if p == LitUndef {
+		return "Undef"
+	}
 	if p.Sign() == false {
 		return strconv.FormatInt(int64(p.Var()), 10)
 	} else {

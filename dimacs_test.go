@@ -10,8 +10,8 @@ func TestDimacs01(t *testing.T) {
 	p cnf 5 6
 	4 5 6 3 0
 	-1 2 1 0
-	`), false)
+	`))
 	for _, x := range cs {
-		fmt.Println(*x)
+		fmt.Println(x)
 	}
 }

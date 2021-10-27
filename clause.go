@@ -88,7 +88,7 @@ func (c *Clause) Subsumes(d *Clause) (Lit, error) {
 		default:
 		}
 	}
-	return 0, ErrLitUndef
+	return LitUndef, nil
 }
 
 // The function is called in the Subsumes only

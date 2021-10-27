@@ -35,7 +35,7 @@ func (b LBool) String() string {
 	}
 }
 
-func Btolb(x bool) LBool {
+func NewLBool(x bool) LBool {
 	if x {
 		return LTrue
 	} else {
@@ -55,7 +55,7 @@ func LNeq(x, y LBool) bool {
 	return !LEq(x, y)
 }
 
-func LFlip(x LBool, y bool) LBool {
+func (x LBool) Flip(y bool) LBool {
 	if y {
 		return LBool(x ^ 1)
 	} else {

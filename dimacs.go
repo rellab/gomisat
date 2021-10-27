@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func ParseDimacs(b []byte, _ bool) ([]*Clause, error) {
+func ParseDimacs(b []byte) ([][]int64, error) {
 	in := bytes.NewBuffer(b)
 	s := bufio.NewScanner(in)
 	var nlits, nclauses int
@@ -23,26 +23,22 @@ func ParseDimacs(b []byte, _ bool) ([]*Clause, error) {
 			break
 		}
 	}
-	clauses := make([]*Clause, 0)
+	clauses := make([][]int64, 0)
 	for s.Scan() {
 		t := strings.TrimSpace(s.Text())
 		a := strings.Split(t, " ")
-		lits := make([]Lit, 0, len(a)-1)
+		lits := make([]int64, 0, len(a)-1)
 		for _, x := range a {
 			if v, err := strconv.Atoi(x); err == nil {
-				switch {
-				case v > 0:
-					lits = append(lits, MkLit(Var(v), false))
-				case v < 0:
-					lits = append(lits, MkLit(Var(-v), true))
-				default:
+				if v != 0 {
+					lits = append(lits, int64(v))
 				}
 			} else {
 				log.Println("Atoi fails", err)
 			}
 		}
 		if len(lits) != 0 {
-			clauses = append(clauses, MkClause(lits, true, false))
+			clauses = append(clauses, lits)
 		}
 	}
 	if len(clauses) != nclauses {

@@ -1,0 +1,52 @@
+package gomisat
+
+import (
+	"bufio"
+	"bytes"
+	"log"
+	"strconv"
+	"strings"
+)
+
+func ParseDimacs(b []byte, _ bool) ([]*Clause, error) {
+	in := bytes.NewBuffer(b)
+	s := bufio.NewScanner(in)
+	var nlits, nclauses int
+	for s.Scan() {
+		t := strings.TrimSpace(s.Text())
+		a := strings.Split(t, " ")
+		if a[0] == "p" && a[1] == "cnf" {
+			nlits, _ = strconv.Atoi(a[2])
+			nclauses, _ = strconv.Atoi(a[3])
+			log.Println("Number of literals:", nlits)
+			log.Println("Number of clauses:", nclauses)
+			break
+		}
+	}
+	clauses := make([]*Clause, 0)
+	for s.Scan() {
+		t := strings.TrimSpace(s.Text())
+		a := strings.Split(t, " ")
+		lits := make([]Lit, 0, len(a)-1)
+		for _, x := range a {
+			if v, err := strconv.Atoi(x); err == nil {
+				switch {
+				case v > 0:
+					lits = append(lits, MkLit(Var(v), false))
+				case v < 0:
+					lits = append(lits, MkLit(Var(-v), true))
+				default:
+				}
+			} else {
+				log.Println("Atoi fails", err)
+			}
+		}
+		if len(lits) != 0 {
+			clauses = append(clauses, MkClause(lits, true, false))
+		}
+	}
+	if len(clauses) != nclauses {
+		log.Println("Did not match the number of clauses generated to the number of clauses defined on the header of DIMCS:", len(clauses))
+	}
+	return clauses, nil
+}

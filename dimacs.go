@@ -67,6 +67,6 @@ func (s *Solver) AddClauseFromCode(codes []int64) {
 // This function is called from AddClauseFromCode only
 func (s *Solver) addVar(v int64) {
 	for v >= int64(s.nextVar) {
-		s.newVar(LUndef, true)
+		s.newVar(true)
 	}
 }

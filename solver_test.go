@@ -63,3 +63,57 @@ func TestSolver04(t *testing.T) {
 	fmt.Println(s.ok)
 	fmt.Println(s.assigns)
 }
+
+func TestSolver05(t *testing.T) {
+	cs := [][]int64{
+		[]int64{1, 2},
+		[]int64{-1},
+	}
+	fmt.Println(cs)
+	s := NewSolver()
+	for _, x := range cs {
+		s.AddClauseFromCode(x)
+	}
+	fmt.Println(s)
+	fmt.Println(s.ok)
+	fmt.Println(s.assigns)
+	for _, c := range s.clauses {
+		fmt.Println(c)
+	}
+	s.Simplify()
+	fmt.Println(s)
+	fmt.Println(s.ok)
+	fmt.Println(s.assigns)
+	for _, c := range s.clauses {
+		fmt.Println(c)
+	}
+}
+
+func TestSolver06(t *testing.T) {
+	cs := [][]int64{
+		[]int64{1},
+		[]int64{-1},
+	}
+	fmt.Println(cs)
+	s := NewSolver()
+	for _, x := range cs {
+		s.AddClauseFromCode(x)
+		fmt.Println(s.ok)
+	}
+}
+
+func TestSolver07(t *testing.T) {
+	cs := [][]int64{
+		[]int64{1, 4, -3, 6},
+		[]int64{5, 2},
+		[]int64{-1, 3, 2},
+	}
+	fmt.Println(cs)
+	s := NewSolver()
+	for _, x := range cs {
+		s.AddClauseFromCode(x)
+	}
+	s.Simplify()
+	options := DefaultSolverOptions()
+	s.search(1, options)
+}

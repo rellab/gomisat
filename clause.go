@@ -2,9 +2,10 @@ package gomisat
 
 import (
 	"errors"
-	_ "fmt"
+	"fmt"
 	_ "log"
 	_ "strconv"
+	"strings"
 )
 
 var (
@@ -12,30 +13,36 @@ var (
 )
 
 type ClauseHeader struct {
-	mark     byte
 	learnt   bool
 	hasExtra bool
 	reloced  bool
 }
 
 type Clause struct {
-	header ClauseHeader
-	act    float32
-	abs    uint64
-	lits   []Lit
+	header   ClauseHeader
+	activity float64
+	abs      uint64
+	lits     []Lit
+}
+
+func (c *Clause) String() string {
+	s := make([]string, 0, len(c.lits))
+	for _, x := range c.lits {
+		s = append(s, x.String())
+	}
+	return "[" + strings.Join(s, ",") + "] (" + fmt.Sprintf("%p", c) + ")"
 }
 
 func MkClause(ps []Lit, useExtra bool, learnt bool) *Clause {
 	c := &Clause{
 		header: ClauseHeader{
-			mark:     0,
 			learnt:   learnt,
 			hasExtra: useExtra,
 			reloced:  false,
 		},
-		act:  0.0,
-		abs:  0,
-		lits: ps,
+		activity: 0.0,
+		abs:      0,
+		lits:     ps,
 	}
 	c.CalcAbstraction()
 	return c
@@ -50,22 +57,6 @@ func (c *Clause) CalcAbstraction() {
 		}
 	}
 	c.abs = abst
-}
-
-func (c *Clause) Size() int {
-	return len(c.lits)
-}
-
-func (c *Clause) Shrink(i int) {
-	c.lits = c.lits[:len(c.lits)-i]
-}
-
-func (c *Clause) Pop() {
-	c.Shrink(1)
-}
-
-func (c *Clause) Last() Lit {
-	return c.lits[len(c.lits)-1]
 }
 
 func (c *Clause) Subsumes(d *Clause) (Lit, error) {

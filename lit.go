@@ -15,6 +15,14 @@ var (
 
 type Var int64
 
+func (v Var) String() string {
+	if v == VarUndef {
+		return "Undef"
+	} else {
+		return strconv.FormatInt(int64(v)+1, 10)
+	}
+}
+
 type Lit int64
 
 func (p Lit) String() string {
@@ -22,9 +30,9 @@ func (p Lit) String() string {
 		return "Undef"
 	}
 	if p.Sign() == false {
-		return strconv.FormatInt(int64(p.Var()), 10)
+		return strconv.FormatInt(int64(p.Var())+1, 10)
 	} else {
-		return strconv.FormatInt(-int64(p.Var()), 10)
+		return "~" + strconv.FormatInt(int64(p.Var())+1, 10)
 	}
 }
 

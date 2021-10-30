@@ -23,7 +23,7 @@ type SolverOptions struct {
 	RestartInc                 float64 // The factor with which the restart limit is multiplied in each restart. (default 1.5)
 	LearntsizeFactor           float64 // The intitial limit for learnt clauses is a factor of the original clauses. (default 1 / 3)
 	LearntsizeInc              float64 // The limit for learnt clauses is multiplied with this factor each restart. (default 1.1)
-	LearntsizeAdjustStartConfl int
+	LearntsizeAdjustStartConfl float64
 	LearntsizeAdjustInc        float64
 }
 
@@ -72,13 +72,14 @@ type Solver struct {
 	trailLim    []int     // Separator indices for different decision levels in 'trail'.
 	assumptions []Lit     // Current set of assumptions provided to solve by the user.
 
-	activity map[Var]float64   // A heuristic measurement of the activity of a variable.
-	assigns  map[Var]LBool     // The current assignments.
-	polarity map[Var]bool      // The preferred polarity of each variable.
-	userPol  map[Var]bool      // The users preferred polarity of each variable.
-	decision map[Var]bool      // Declares if a variable is eligible for selection in the decision heuristic.
-	vardata  map[Var]VarData   // Stores reason and level for each variable.
-	watches  map[Lit][]Watcher // watched[lit] is a list of constraints watching 'lit' (will go there if literal becomes true).
+	activity  map[Var]float64   // A heuristic measurement of the activity of a variable.
+	assigns   map[Var]LBool     // The current assignments.
+	polarity  map[Var]bool      // The preferred polarity of each variable.
+	userPol   map[Var]bool      // The users preferred polarity of each variable.
+	decision  map[Var]bool      // Declares if a variable is eligible for selection in the decision heuristic.
+	vardata   map[Var]VarData   // Stores reason and level for each variable.
+	watches   map[Lit][]Watcher // watched[lit] is a list of constraints watching 'lit' (will go there if literal becomes true).
+	orderHeap *VarHeap          // A priority queue of variables ordered with respect to the variable activity.
 
 	maxLearnts            float64
 	learntsizeAdjustConfl float64
@@ -116,6 +117,7 @@ type Solver struct {
 	Decisions    uint64
 	Propagations uint64
 	Conflicts    uint64
+	RndDecisions uint64
 
 	Progress float64
 
@@ -127,7 +129,7 @@ type Solver struct {
 }
 
 func NewSolver() *Solver {
-	return &Solver{
+	s := &Solver{
 		activity:          make(map[Var]float64),
 		assigns:           make(map[Var]LBool),
 		polarity:          make(map[Var]bool),
@@ -147,6 +149,10 @@ func NewSolver() *Solver {
 		propagationBudget: -1,
 		asynchInterrupt:   false,
 	}
+	s.orderHeap = NewVarHeap(func(x, y Var) bool {
+		return s.activity[x] > s.activity[y]
+	})
+	return s
 }
 
 func (s *Solver) setDecisionVar(v Var, b bool) {
@@ -156,7 +162,10 @@ func (s *Solver) setDecisionVar(v Var, b bool) {
 		s.decVars--
 	}
 	s.decision[v] = b
-	// insertVarOrder(v)
+	if b {
+		s.orderHeap.Insert(v)
+	}
+	log.Println("setDecisionVar:", s.orderHeap)
 }
 
 // Add a new variable with parameters specifying variable mode.
@@ -462,34 +471,38 @@ func (s *Solver) Simplify() bool {
 	return true
 }
 
-// func (s *Solver) Solve(options *SolverOptions) LBool {
-// 	// s.model.clear()
-// 	// s.conflict.clear()
-// 	if s.ok == false {
-// 		return LFalse
-// 	}
+func (s *Solver) Solve(options *SolverOptions) LBool {
+	// s.model.clear()
+	// s.conflict.clear()
+	if s.ok == false {
+		return LFalse
+	}
 
-// 	//s.solves++
+	s.Solves++
 
-// 	maxLearnts := float64(s.numClauses) * options.LearntsizeFactor
-// 	if maxLearnts < options.MinLearntsLim {
-// 		maxLearnts = options.MinLearntsLim
-// 	}
+	s.maxLearnts = float64(s.numClauses) * options.LearntsizeFactor
+	if s.maxLearnts < options.MinLearntsLim {
+		s.maxLearnts = options.MinLearntsLim
+	}
 
-// 	learntsizeAdjustConfl := options.LearntsizeAdjustStartConfl
-// 	learntsizeAdjustCnt := learntsizeAdjustConfl
-// 	status := LUndef
+	s.learntsizeAdjustConfl = options.LearntsizeAdjustStartConfl
+	s.learntsizeAdjustCnt = int(s.learntsizeAdjustConfl)
+	status := LUndef
 
-// 	log.Println("==== Search Statistics ====")
+	log.Println("==== Search Statistics ====")
 
-// 	// Search
-// 	currRestarts := 0
-// 	for status != LTrue && status != LFalse { // this means status == LUndef
-// 		resetBase := 1.0 // should be implemented
-// 		status = s.search(int(resetBase*float64(options.RestartFirst)), learntsizeAdjustConfl, learntsizeAdjustCnt)
-// 	}
-// 	return status
-// }
+	// Search
+	currRestarts := 0
+	for status != LTrue && status != LFalse { // this means status == LUndef
+		resetBase := 1.0 // should be implemented
+		status = s.search(int(resetBase*float64(options.RestartFirst)), options)
+		if s.withinBudget() == false {
+			break
+		}
+		currRestarts++
+	}
+	return status
+}
 
 // search
 // Search for a model the specified number of conflicts.
@@ -505,7 +518,8 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 	conflictC := 0
 	s.Starts++
 
-	for k := 0; k < 2; k++ {
+	// for k := 0; k < 5; k++ { // for test
+	for {
 		if confl := s.Propagate(); confl != nil {
 			log.Println("search: Find a conflict", confl)
 			// conflict
@@ -582,7 +596,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				s.Decisions++
 				next = s.pickBranchLit(options)
 				if next == LitUndef {
-					log.Println("search: Model found")
+					log.Println("search: Model found", s.assigns)
 					return LTrue
 				}
 			}
@@ -599,7 +613,25 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 	next := VarUndef
 
 	// Random decision
-	next = Var(1) // for test
+	if drand(&options.RandomSeed) < options.RandomVarFreq && s.orderHeap.IsEmpty() == false {
+		next = s.orderHeap.heap[irand(&options.RandomSeed, len(s.orderHeap.heap))]
+		if (s.assigns[next] != LTrue || s.assigns[next] != LFalse) && s.decision[next] == true {
+			s.RndDecisions++
+		}
+	}
+
+	// Activity based decision
+	for next == VarUndef || s.assigns[next] == LTrue || s.assigns[next] == LFalse || s.decision[next] == false {
+		if s.orderHeap.IsEmpty() {
+			next = VarUndef
+			break
+		} else {
+			next = s.orderHeap.RemoveMin()
+			log.Println("pickBranchLit:", s.orderHeap)
+		}
+	}
+
+	log.Println("pickBranchLit: Choose a var", next)
 
 	// Choose polarity based on different polarity modes (global or per-variable)
 	if next == VarUndef {
@@ -615,6 +647,7 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 
 func (s *Solver) newDecisionLevel() {
 	s.trailLim = append(s.trailLim, len(s.trail))
+	log.Println("newDecisionLevel: decision level", s.decisionLevel())
 }
 
 func (s *Solver) progressEstimate() float64 {
@@ -688,8 +721,10 @@ func (s *Solver) varBumpActivity(v Var) {
 		s.varInc *= 1e-100
 	}
 	// update orderheap with respect to new activity
-	//   TODO
-	//     original: if (order_heap.inHeap(v)) order_heap.decrease(v)
+	if s.orderHeap.InHeap(v) {
+		s.orderHeap.Decrease(v)
+		log.Println("varBumpActivity:", s.orderHeap)
+	}
 }
 
 func (s *Solver) varDecayActivity(options *SolverOptions) {
@@ -709,7 +744,8 @@ func (s *Solver) cancelUntil(level int, options *SolverOptions) {
 			if options.PhaseSaving > 1 || (options.PhaseSaving == 1 && i > s.trailLim[len(s.trailLim)-1]) {
 				s.polarity[x] = s.trail[i].Sign()
 			}
-			// TODO: insertVarOrder(x)
+			s.orderHeap.Insert(x)
+			log.Println("cancelUntil:", s.orderHeap)
 		}
 		s.qhead = s.trailLim[level]
 		s.trail = s.trail[:s.trailLim[level]]

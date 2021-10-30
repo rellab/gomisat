@@ -117,3 +117,20 @@ func TestSolver07(t *testing.T) {
 	options := DefaultSolverOptions()
 	s.search(1, options)
 }
+
+func TestSolver08(t *testing.T) {
+	cs := [][]int64{
+		[]int64{1, 2},
+		[]int64{-1, 2},
+		[]int64{-1, -2},
+		[]int64{1, -2},
+	}
+	fmt.Println(cs)
+	s := NewSolver()
+	for _, x := range cs {
+		s.AddClauseFromCode(x)
+	}
+	s.Simplify()
+	options := DefaultSolverOptions()
+	s.Solve(options)
+}

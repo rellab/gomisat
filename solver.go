@@ -171,7 +171,7 @@ func (s *Solver) setDecisionVar(v Var, b bool) {
 // Add a new variable with parameters specifying variable mode.
 //   upol: Assinged value for a variable. The default is LUndef
 //   dvar: Indicator whether a variable is to be determined. The default is true.
-func (s *Solver) newVar(dvar bool) Var {
+func (s *Solver) NewVar(dvar bool) Var {
 	var v Var
 	n := len(s.freeVars)
 	if n > 0 {

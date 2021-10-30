@@ -2,6 +2,8 @@ package gomisat
 
 import (
 	"fmt"
+	_ "io/ioutil"
+	_ "log"
 	"testing"
 )
 
@@ -120,10 +122,12 @@ func TestSolver07(t *testing.T) {
 
 func TestSolver08(t *testing.T) {
 	cs := [][]int64{
-		[]int64{1, 2},
-		[]int64{-1, 2},
-		[]int64{-1, -2},
-		[]int64{1, -2},
+		[]int64{-1, -3, -4},
+		[]int64{2, 3, -4},
+		[]int64{1, -2, 4},
+		[]int64{1, 3, 4},
+		[]int64{-1, 2, -3},
+		[]int64{-4},
 	}
 	fmt.Println(cs)
 	s := NewSolver()

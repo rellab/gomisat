@@ -100,11 +100,13 @@ type Solver struct {
 	simpDBAssigns   int   // Number of top-level assignments since last execution of simplify()
 	removeSatisfied bool
 
+	conflict map[Lit]struct{}
+	model    map[Var]LBool
+
 	claInc float64 // Amount to bump next clause with
 	varInc float64 // Amount to bump next variable with
 
-	nextVar Var
-
+	nextVar      Var
 	releasedVars []Var
 	freeVars     []Var
 
@@ -118,14 +120,7 @@ type Solver struct {
 	Propagations uint64
 	Conflicts    uint64
 	RndDecisions uint64
-
-	Progress float64
-
-	// Temporarie
-	// seen           map[Var]byte
-	//analyzeStack   []int
-	//analyzeToClear []Lit
-	//addTmp         []Lit
+	Progress     float64
 }
 
 func NewSolver() *Solver {
@@ -240,6 +235,25 @@ func (s *Solver) LitValue(p Lit) LBool {
 
 func (s *Solver) decisionLevel() int {
 	return len(s.trailLim)
+}
+
+func luby(y float64, x int) float64 {
+	// Find the finite subsequence that contains index 'x', and the
+	// size of that subsequence:
+
+	var size, seq int
+	seq = 0
+	for size = 1; size < x+1; size = 2*size + 1 {
+		seq++
+	}
+
+	for size-1 != x {
+		size = (size - 1) >> 1
+		seq--
+		x = x % size
+	}
+
+	return math.Pow(y, float64(seq))
 }
 
 func (s *Solver) UncheckedEnqueue(p Lit, c *Clause) {
@@ -472,8 +486,9 @@ func (s *Solver) Simplify() bool {
 }
 
 func (s *Solver) Solve(options *SolverOptions) LBool {
-	// s.model.clear()
-	// s.conflict.clear()
+	s.model = make(map[Var]LBool)
+	s.conflict = make(map[Lit]struct{})
+
 	if s.ok == false {
 		return LFalse
 	}
@@ -494,12 +509,27 @@ func (s *Solver) Solve(options *SolverOptions) LBool {
 	// Search
 	currRestarts := 0
 	for status != LTrue && status != LFalse { // this means status == LUndef
-		resetBase := 1.0 // should be implemented
+		var resetBase float64
+		if options.LubyRestart {
+			resetBase = luby(options.RestartInc, currRestarts)
+		} else {
+			resetBase = math.Pow(options.RestartInc, float64(currRestarts))
+		}
+
 		status = s.search(int(resetBase*float64(options.RestartFirst)), options)
 		if s.withinBudget() == false {
 			break
 		}
 		currRestarts++
+	}
+
+	if status == LTrue {
+		// Extend & copy model
+		for k, v := range s.assigns {
+			s.model[k] = v
+		}
+	} else if status == LFalse && len(s.conflict) == 0 {
+		s.ok = false
 	}
 	return status
 }

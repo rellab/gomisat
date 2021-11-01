@@ -816,11 +816,14 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 			s.claBumpActivity(c)
 		}
 
-		for j, q := range c.lits {
-			if j == 0 && p != LitUndef {
-				continue
-			}
-			v := q.Var()
+		var j int
+		if p == LitUndef {
+			j = 0
+		} else {
+			j = 1
+		}
+		for ; j < len(c.lits); j++ {
+			v := c.lits[j].Var()
 			if _, ok := seen[v]; ok == false {
 				if s.vardata[v].level > 0 {
 					s.varBumpActivity(v)
@@ -828,7 +831,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 					if s.vardata[v].level >= s.decisionLevel() {
 						pathC++
 					} else {
-						outLearnt = append(outLearnt, q)
+						outLearnt = append(outLearnt, c.lits[j])
 					}
 				}
 			}
@@ -838,6 +841,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 			p = s.trail[index]
 			if _, ok := seen[p.Var()]; ok {
 				c = s.vardata[p.Var()].reason
+				delete(seen, p.Var())
 				break
 			} else {
 				index--

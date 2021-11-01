@@ -13,9 +13,11 @@ func ParseDimacs(b []byte) ([][]int64, error) {
 	s := bufio.NewScanner(in)
 	var nlits, nclauses int
 	for s.Scan() {
-		t := strings.TrimSpace(s.Text())
-		a := strings.Split(t, " ")
-		if a[0] == "p" && a[1] == "cnf" {
+		a := strings.Fields(s.Text())
+		if len(a) >= 1 && a[0] == "c" { // comment line
+			continue
+		}
+		if len(a) >= 2 && a[0] == "p" && a[1] == "cnf" {
 			nlits, _ = strconv.Atoi(a[2])
 			nclauses, _ = strconv.Atoi(a[3])
 			log.Println("Number of literals:", nlits)
@@ -25,19 +27,21 @@ func ParseDimacs(b []byte) ([][]int64, error) {
 	}
 	clauses := make([][]int64, 0)
 	for s.Scan() {
-		t := strings.TrimSpace(s.Text())
-		a := strings.Split(t, " ")
-		lits := make([]int64, 0, len(a)-1)
-		for _, x := range a {
-			if v, err := strconv.Atoi(x); err == nil {
-				if v != 0 {
-					lits = append(lits, int64(v))
-				}
-			} else {
-				log.Println("Atoi fails", err)
+		a := strings.Fields(s.Text())
+		if len(a) >= 2 {
+			lits := make([]int64, 0, len(a)-1)
+			if len(a) >= 1 && a[0] == "c" { // comment line
+				continue
 			}
-		}
-		if len(lits) != 0 {
+			for _, x := range a {
+				if v, err := strconv.Atoi(x); err == nil {
+					if v != 0 {
+						lits = append(lits, int64(v))
+					}
+				} else {
+					log.Println("Atoi fails", err)
+				}
+			}
 			clauses = append(clauses, lits)
 		}
 	}

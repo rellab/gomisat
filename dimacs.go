@@ -47,15 +47,15 @@ func ParseDimacs(b []byte) ([][]int64, error) {
 	return clauses, nil
 }
 
-func (s *Solver) AddClauseFromCode(codes []int64) {
+func (s *Solver) AddClauseFromCode(codes []int64, options *SolverOptions) {
 	lits := make([]Lit, 0, len(codes))
 	for _, v := range codes {
 		switch {
 		case v > 0:
-			s.addVar(v - 1) // v starts with 0
+			s.addVar(v-1, options) // v starts with 0
 			lits = append(lits, MkLit(Var(v-1), false))
 		case v < 0:
-			s.addVar(-(v + 1)) // v starts with 0
+			s.addVar(-(v + 1), options) // v starts with 0
 			lits = append(lits, MkLit(Var(-(v+1)), true))
 		default:
 		}
@@ -65,8 +65,8 @@ func (s *Solver) AddClauseFromCode(codes []int64) {
 
 // add a variable from a general int64
 // This function is called from AddClauseFromCode only
-func (s *Solver) addVar(v int64) {
+func (s *Solver) addVar(v int64, options *SolverOptions) {
 	for v >= int64(s.nextVar) {
-		s.NewVar(true)
+		s.NewVar(true, options)
 	}
 }

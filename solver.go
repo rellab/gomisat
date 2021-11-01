@@ -143,6 +143,8 @@ func NewSolver() *Solver {
 		conflictBudget:    -1,
 		propagationBudget: -1,
 		asynchInterrupt:   false,
+		claInc:            1,
+		varInc:            1,
 	}
 	s.orderHeap = NewVarHeap(func(x, y Var) bool {
 		return s.activity[x] > s.activity[y]
@@ -166,7 +168,7 @@ func (s *Solver) setDecisionVar(v Var, b bool) {
 // Add a new variable with parameters specifying variable mode.
 //   upol: Assinged value for a variable. The default is LUndef
 //   dvar: Indicator whether a variable is to be determined. The default is true.
-func (s *Solver) NewVar(dvar bool) Var {
+func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 	var v Var
 	n := len(s.freeVars)
 	if n > 0 {
@@ -179,7 +181,11 @@ func (s *Solver) NewVar(dvar bool) Var {
 
 	s.assigns[v] = LUndef
 	s.vardata[v] = VarData{reason: nil, level: 0}
-	s.activity[v] = 0 // should be changed later
+	if options.RndInitAct {
+		s.activity[v] = drand(&options.RandomSeed) * 0.00001
+	} else {
+		s.activity[v] = 0
+	}
 	s.polarity[v] = true
 	// s.userPol[v] = upol
 	s.setDecisionVar(v, dvar)
@@ -270,7 +276,7 @@ func (s *Solver) RemoveSatisfied(cs []*Clause) []*Clause {
 			s.RemoveClause(c)
 		} else {
 			// Trim clause
-			// assert(c.LitValue(c.lits[0]) == LUndef && c.LitValue(c.lits[1]) == LUndef
+			log.Println("RemoveSatisfied assertion: c.LitValue(c.lits[0]) == LUndef && c.LitValue(c.lits[1]) == LUndef", (s.LitValue(c.lits[0]) != LTrue && s.LitValue(c.lits[0]) != LFalse) && (s.LitValue(c.lits[1]) != LTrue && s.LitValue(c.lits[1]) != LFalse))
 			for k := 2; k < len(c.lits); k++ {
 				if s.LitValue(c.lits[k]) == LFalse {
 					log.Println("RemoveSatisfied: Remove a literal that becomes false", c.lits[k])
@@ -387,6 +393,7 @@ func (s *Solver) Propagate() *Clause {
 			if c.lits[0] == falseLit {
 				c.lits[0], c.lits[1] = c.lits[1], falseLit
 			}
+			i++
 
 			// If 0th watch is true, then clause is already satisfied.
 			first := c.lits[0]
@@ -397,7 +404,6 @@ func (s *Solver) Propagate() *Clause {
 				j++
 				continue
 			}
-			i++
 
 			// Look for new watch
 			for k := 2; k < len(c.lits); k++ {
@@ -561,6 +567,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 			}
 			learntClause, backtranckLevel := s.analyze(confl, options)
 			s.cancelUntil(backtranckLevel, options)
+			log.Println("Propagete: The result of analyze", learntClause, backtranckLevel)
 
 			if len(learntClause) == 1 {
 				s.UncheckedEnqueue(learntClause[0], nil)
@@ -649,6 +656,7 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 			s.RndDecisions++
 		}
 	}
+	log.Println("pickBranchLit: Random choose", next)
 
 	// Activity based decision
 	for next == VarUndef || s.assigns[next] == LTrue || s.assigns[next] == LFalse || s.decision[next] == false {
@@ -657,11 +665,10 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 			break
 		} else {
 			next = s.orderHeap.RemoveMin()
-			log.Println("pickBranchLit:", s.orderHeap)
+			// log.Println("pickBranchLit:", s.orderHeap)
 		}
 	}
-
-	log.Println("pickBranchLit: Choose a var", next)
+	log.Println("pickBranchLit: Active based choose", next)
 
 	// Choose polarity based on different polarity modes (global or per-variable)
 	if next == VarUndef {
@@ -753,7 +760,7 @@ func (s *Solver) varBumpActivity(v Var) {
 	// update orderheap with respect to new activity
 	if s.orderHeap.InHeap(v) {
 		s.orderHeap.Decrease(v)
-		log.Println("varBumpActivity:", s.orderHeap)
+		// log.Println("varBumpActivity:", s.orderHeap)
 	}
 }
 
@@ -775,7 +782,7 @@ func (s *Solver) cancelUntil(level int, options *SolverOptions) {
 				s.polarity[x] = s.trail[i].Sign()
 			}
 			s.orderHeap.Insert(x)
-			log.Println("cancelUntil:", s.orderHeap)
+			// log.Println("cancelUntil:", s.orderHeap)
 		}
 		s.qhead = s.trailLim[level]
 		s.trail = s.trail[:s.trailLim[level]]
@@ -838,15 +845,19 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 		}
 		pathC--
 
+		// log.Println("analyze: pathC", pathC)
 		if pathC == 0 {
 			break
 		}
 	}
 	outLearnt[0] = p.Not()
 
+	log.Println("analyze: outLearnt", outLearnt)
+
 	// simplify conflict clause
 	switch {
 	case options.CcminMode == 2:
+		// log.Println("analyze: ccmode 2")
 		j := 1
 		for i := 1; i < len(outLearnt); i++ {
 			p := outLearnt[i]
@@ -859,6 +870,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 		outLearnt = outLearnt[:j]
 		s.totLiterals += uint64(len(outLearnt))
 	case options.CcminMode == 1:
+		// log.Println("analyze: ccmode 1")
 		j := 1
 		for i := 1; i < len(outLearnt); i++ {
 			p := outLearnt[i]
@@ -880,6 +892,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 		outLearnt = outLearnt[:j]
 		s.totLiterals += uint64(len(outLearnt))
 	default:
+		log.Println("analyze: ccmode 0")
 		s.maxLiterals += uint64(len(outLearnt))
 		s.totLiterals += uint64(len(outLearnt))
 	}
@@ -918,8 +931,9 @@ func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
 	//   2: seen_removable
 	//   3: seen_failed
 	//
-	// assert(seen[var(p)] == seen_undef || seen[var(p)] == seen_source
-	// assert(reason(var(p))) != nil
+
+	// log.Println("litRedundant assertion (seen[var(p)] == seen_undef || seen[var(p)] == seen_source):", seen[p.Var()] == 0 || seen[p.Var()] == 1)
+	// log.Println("litRedundant assertion (reason(var(p)) != nil):", s.vardata[p.Var()].reason != nil)
 
 	stack := make([]redundantStackElem, 0, 10)
 	c := s.vardata[p.Var()].reason
@@ -930,7 +944,7 @@ func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
 
 			// Variable at level 0 or previsouly removable
 			if s.vardata[l.Var()].level == 0 || seen[l.Var()] == 1 || seen[l.Var()] == 2 {
-				continue
+				goto nextLoop
 			}
 
 			// Check variable cannot be removed for some local reason
@@ -963,8 +977,9 @@ func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
 			c = s.vardata[p.Var()].reason
 			stack = stack[:len(stack)-1]
 		}
+	nextLoop:
 		i++
 	}
 
-	return false
+	return true
 }

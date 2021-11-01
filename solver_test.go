@@ -15,8 +15,9 @@ func TestSolver01(t *testing.T) {
 	`))
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	fmt.Println(s)
-	s.AddClauseFromCode(cs[0])
+	s.AddClauseFromCode(cs[0], options)
 	fmt.Println(s)
 }
 
@@ -28,8 +29,9 @@ func TestSolver02(t *testing.T) {
 	`))
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 	}
 	fmt.Println(s)
 	fmt.Println(s.ok)
@@ -43,8 +45,9 @@ func TestSolver03(t *testing.T) {
 	}
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 	}
 	fmt.Println(s)
 	fmt.Println(s.ok)
@@ -58,8 +61,9 @@ func TestSolver04(t *testing.T) {
 	}
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 	}
 	fmt.Println(s)
 	fmt.Println(s.ok)
@@ -73,8 +77,9 @@ func TestSolver05(t *testing.T) {
 	}
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 	}
 	fmt.Println(s)
 	fmt.Println(s.ok)
@@ -98,8 +103,9 @@ func TestSolver06(t *testing.T) {
 	}
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 		fmt.Println(s.ok)
 	}
 }
@@ -112,11 +118,11 @@ func TestSolver07(t *testing.T) {
 	}
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 	}
 	s.Simplify()
-	options := DefaultSolverOptions()
 	s.search(1, options)
 }
 
@@ -131,10 +137,10 @@ func TestSolver08(t *testing.T) {
 	}
 	fmt.Println(cs)
 	s := NewSolver()
+	options := DefaultSolverOptions()
 	for _, x := range cs {
-		s.AddClauseFromCode(x)
+		s.AddClauseFromCode(x, options)
 	}
 	s.Simplify()
-	options := DefaultSolverOptions()
 	s.Solve(options)
 }

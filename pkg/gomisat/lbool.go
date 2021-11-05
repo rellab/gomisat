@@ -63,6 +63,10 @@ func (x LBool) Flip(y bool) LBool {
 	}
 }
 
+func (x LBool) Not() LBool {
+	return LBool(x ^ 1)
+}
+
 func LAnd(x, y LBool) LBool {
 	sel := (x << 1) | (y << 3)
 	v := 0xf7f755f4 >> sel & 0x3

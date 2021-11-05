@@ -2,6 +2,7 @@ package test
 
 import (
 	"com.github/rellab/gomisat/pkg/gomisat"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -57,4 +58,18 @@ func BenchmarkDimacs03(b *testing.B) {
 		s.Simplify()
 		s.Solve(options)
 	}
+}
+
+func TestDimacs04(t *testing.T) {
+	file, _ := os.Open("testdata/satlib/unsat-dimacs-dubois/dubois50.cnf")
+	defer file.Close()
+	buf, _ := io.ReadAll(file)
+	cs, _ := gomisat.ParseDimacs(buf)
+	s := gomisat.NewSolver()
+	options := gomisat.DefaultSolverOptions()
+	for _, x := range cs {
+		s.AddClauseFromCode(x, options)
+	}
+	s.Simplify()
+	fmt.Println(s.Solve(options))
 }

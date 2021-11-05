@@ -21,6 +21,4 @@ func TestLit02(t *testing.T) {
 	x := MkLit(Var(1), false)
 	fmt.Println(x)
 	fmt.Println(x.Not())
-	fmt.Println(LitFlip(x, true))
-	fmt.Println(LitFlip(x, false))
 }

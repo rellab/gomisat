@@ -4,22 +4,26 @@ import (
 	"fmt"
 )
 
+var (
+	UndefIndex int = -1
+)
+
 type VarHeap struct {
 	heap     []Var
-	indicies map[Var]int
+	indicies []int
 	lt       func(x, y Var) bool
 }
 
 func NewVarHeap(lt func(x, y Var) bool) *VarHeap {
 	return &VarHeap{
 		heap:     make([]Var, 0),
-		indicies: make(map[Var]int),
+		indicies: make([]int, 0),
 		lt:       lt,
 	}
 }
 
 func (h *VarHeap) String() string {
-	return fmt.Sprint("Heap ", h.heap, " Indicies ", h.indicies)
+	return fmt.Sprint("Heap ", h.heap) //, " Indicies ", h.indicies)
 }
 
 func left(i int) int {
@@ -71,8 +75,7 @@ func (h *VarHeap) IsEmpty() bool {
 }
 
 func (h *VarHeap) InHeap(v Var) bool {
-	_, ok := h.indicies[v]
-	return ok
+	return h.indicies[v] != UndefIndex
 }
 
 func (h *VarHeap) Decrease(v Var) {
@@ -84,7 +87,7 @@ func (h *VarHeap) Increase(v Var) {
 }
 
 func (h *VarHeap) Insert(v Var) {
-	if _, ok := h.indicies[v]; ok == false {
+	if h.indicies[v] == UndefIndex {
 		i := len(h.heap)
 		h.heap = append(h.heap, v)
 		h.indicies[v] = i
@@ -94,12 +97,28 @@ func (h *VarHeap) Insert(v Var) {
 
 func (h *VarHeap) RemoveMin() Var {
 	x := h.heap[0]
+	h.indicies[x] = UndefIndex
 	h.heap[0] = h.heap[len(h.heap)-1]
 	h.indicies[h.heap[0]] = 0
 	h.heap = h.heap[:len(h.heap)-1]
-	delete(h.indicies, x)
 	if len(h.heap) > 1 {
 		h.percolateDown(0)
 	}
 	return x
+}
+
+func (h *VarHeap) Build(ns []Var) {
+	for _, x := range h.heap {
+		h.indicies[x] = UndefIndex
+	}
+	h.heap = h.heap[:0]
+
+	for i, x := range ns {
+		h.indicies[x] = i
+		h.heap = append(h.heap, x)
+	}
+
+	for i := len(h.heap)/2 - 1; i >= 0; i-- {
+		h.percolateDown(i)
+	}
 }

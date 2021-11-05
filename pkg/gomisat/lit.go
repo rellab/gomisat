@@ -45,11 +45,7 @@ func MkLit(v Var, sign bool) Lit {
 }
 
 func (p Lit) Sign() bool {
-	if p&1 == 1 {
-		return true
-	} else {
-		return false
-	}
+	return p&1 == 1
 }
 
 func (p Lit) Var() Var {
@@ -57,13 +53,5 @@ func (p Lit) Var() Var {
 }
 
 func (p Lit) Not() Lit {
-	return Lit(p ^ 1)
-}
-
-func LitFlip(p Lit, b bool) Lit {
-	if b {
-		return Lit(p ^ 1)
-	} else {
-		return p
-	}
+	return p ^ 1
 }

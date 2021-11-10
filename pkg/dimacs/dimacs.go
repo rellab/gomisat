@@ -1,4 +1,4 @@
-package gomisat
+package dimacs
 
 import (
 	"bufio"
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func ParseDimacs(b []byte) ([][]int64, error) {
+func ParseDimacs(b []byte) ([][]int, error) {
 	in := bytes.NewBuffer(b)
 	s := bufio.NewScanner(in)
 	var nlits, nclauses int
@@ -25,18 +25,18 @@ func ParseDimacs(b []byte) ([][]int64, error) {
 			break
 		}
 	}
-	clauses := make([][]int64, 0)
+	clauses := make([][]int, 0)
 	for s.Scan() {
 		a := strings.Fields(s.Text())
 		if len(a) >= 2 {
-			lits := make([]int64, 0, len(a)-1)
+			lits := make([]int, 0, len(a)-1)
 			if len(a) >= 1 && a[0] == "c" { // comment line
 				continue
 			}
 			for _, x := range a {
 				if v, err := strconv.Atoi(x); err == nil {
 					if v != 0 {
-						lits = append(lits, int64(v))
+						lits = append(lits, int(v))
 					}
 				} else {
 					log.Println("Atoi fails", err)
@@ -51,26 +51,3 @@ func ParseDimacs(b []byte) ([][]int64, error) {
 	return clauses, nil
 }
 
-func (s *Solver) AddClauseFromCode(codes []int64, options *SolverOptions) {
-	lits := make([]Lit, 0, len(codes))
-	for _, v := range codes {
-		switch {
-		case v > 0:
-			s.addVar(v-1, options) // v starts with 0
-			lits = append(lits, MkLit(Var(v-1), false))
-		case v < 0:
-			s.addVar(-(v + 1), options) // v starts with 0
-			lits = append(lits, MkLit(Var(-(v+1)), true))
-		default:
-		}
-	}
-	s.AddClause(lits...)
-}
-
-// add a variable from a general int64
-// This function is called from AddClauseFromCode only
-func (s *Solver) addVar(v int64, options *SolverOptions) {
-	for v >= int64(s.nextVar) {
-		s.NewVar(true, options)
-	}
-}

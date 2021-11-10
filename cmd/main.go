@@ -1,7 +1,8 @@
 package main
 
 import (
-	"com.github/rellab/gomisat/pkg/gomisat"
+	"com.github/rellab/gomisat/pkg/dimacs"
+	"com.github/rellab/gomisat/pkg/sat"
 	"fmt"
 	"io"
 	"os"
@@ -16,9 +17,9 @@ func main() {
 	}
 	defer file.Close()
 	buf, _ := io.ReadAll(file)
-	cs, _ := gomisat.ParseDimacs(buf)
-	s := gomisat.NewSolver()
-	options := gomisat.DefaultSolverOptions()
+	cs, _ := dimacs.ParseDimacs(buf)
+	s := sat.NewSolver()
+	options := sat.DefaultSolverOptions()
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}

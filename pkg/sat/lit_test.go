@@ -1,9 +1,19 @@
-package gomisat
+package sat
 
 import (
 	"fmt"
 	"testing"
 )
+
+func TestLBool02(t *testing.T) {
+	for i := 0; i < 8; i++ {
+		for j := 0; j < 8; j++ {
+			x := LBool(i)
+			y := LBool(j)
+			fmt.Println(i, " == ", j, " = ", x == y)
+		}
+	}
+}
 
 func TestVar01(t *testing.T) {
 	x := VarUndef

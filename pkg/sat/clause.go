@@ -1,4 +1,4 @@
-package gomisat
+package sat
 
 import (
 	"errors"
@@ -21,7 +21,7 @@ type ClauseHeader struct {
 type Clause struct {
 	header   ClauseHeader
 	activity float64
-	abs      uint64
+	abs      uint
 	lits     []Lit
 }
 
@@ -33,33 +33,42 @@ func (c *Clause) String() string {
 	return "[" + strings.Join(s, ",") + "] (" + fmt.Sprintf("%p", c) + ")"
 }
 
-func MkClause(ps []Lit, useExtra bool, learnt bool) *Clause {
-	c := &Clause{
+func MkClause(ps []Lit, learnt bool) *Clause {
+	return &Clause{
 		header: ClauseHeader{
 			learnt:   learnt,
-			hasExtra: useExtra,
+			hasExtra: false,
 			reloced:  false,
 		},
 		activity: 0.0,
 		abs:      0,
 		lits:     ps,
 	}
-	c.CalcAbstraction()
-	return c
+}
+
+func MkExtraClause(ps []Lit, learnt bool) *Clause {
+	return &Clause{
+		header: ClauseHeader{
+			learnt:   learnt,
+			hasExtra: true,
+			reloced:  false,
+		},
+		activity: 0.0,
+		abs:      calcAbstraction(ps),
+		lits:     ps,
+	}
 }
 
 // abst: it likes a hash value for the clause
-func (c *Clause) CalcAbstraction() {
-	abst := uint64(0)
-	if c.header.hasExtra {
-		for _, x := range c.lits {
-			abst |= 0x01 << (x.Var() & 0x3f)
-		}
+func calcAbstraction(ps []Lit) uint {
+	abst := uint(0)
+	for _, x := range ps {
+		abst |= 0x01 << (x.Var() & 0x3f)
 	}
-	c.abs = abst
+	return abst
 }
 
-func (c *Clause) Subsumes(d *Clause) (Lit, error) {
+func (c Clause) Subsumes(d Clause) (Lit, error) {
 	if c.header.learnt == true ||
 		d.header.learnt == true ||
 		c.header.hasExtra == false ||

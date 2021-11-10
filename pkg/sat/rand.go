@@ -1,4 +1,4 @@
-package gomisat
+package sat
 
 func drand(seed *float64) float64 {
 	*seed *= 1389796

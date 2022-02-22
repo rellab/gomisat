@@ -1,0 +1,16 @@
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois100.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois20.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois21.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois22.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois23.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois24.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois30.cnf
+./gomisat ./testdata/satlib/unsat-dimacs-dubois/dubois50.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-3_4-yes1-1.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-3_4-yes1-2.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-3_4-yes1-3.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-3_4-yes1-4.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-6_0-yes1-1.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-6_0-yes1-2.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-6_0-yes1-3.cnf
+./gomisat ./testdata/satlib/file-dimacs-aim/aim-200-6_0-yes1-4.cnf

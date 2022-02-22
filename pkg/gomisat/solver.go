@@ -5,6 +5,8 @@ import (
 	"log"
 	"math"
 	"sort"
+	"fmt"
+	"os"
 )
 
 const (
@@ -107,7 +109,7 @@ type Solver struct {
 	simpDBAssigns   int   // Number of top-level assignments since last execution of simplify()
 	removeSatisfied bool
 
-	conflict map[Lit]struct{}
+	conflict map[Lit]int
 	model    map[Var]LBool
 
 	claInc float64 // Amount to bump next clause with
@@ -128,6 +130,7 @@ type Solver struct {
 	Conflicts    uint64
 	RndDecisions uint64
 	Progress     float64
+	//mem_used	 float64
 }
 
 func NewSolver() *Solver {
@@ -582,7 +585,7 @@ func (s *Solver) rebuildOrderHeap() {
 
 func (s *Solver) Solve(options *SolverOptions) LBool {
 	s.model = make(map[Var]LBool)
-	s.conflict = make(map[Lit]struct{})
+	s.conflict = make(map[Lit]int)
 
 	if s.ok == false {
 		return LFalse
@@ -714,23 +717,41 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 			}
 
 			next := LitUndef
+//			fmt.Println(s.decisionLevel())
+//			fmt.Println(len(s.assumptions))
 			for s.decisionLevel() < len(s.assumptions) {
 				if debug {
 					log.Println("search: Perform user provided assumption")
 				}
 				p := s.assumptions[s.decisionLevel()]
-				switch s.LitValue(p) {
+				/*switch s.LitValue(p) {
 				case LTrue:
-					// Dummy decision level
+					fmt.Println("LTrue")// Dummy decision level
 					s.newDecisionLevel()
 				case LFalse:
-					//s.analyzeFinal(p.Not(), conflict)
+					fmt.Println("LFalse")
+					s.analyzeFinal(p.Not())
 					return LFalse
 				default:
+					//fmt.Println("break")
 					next = p
 					break
-				}
+				}*/
+
+				if s.LitValue(p) == LTrue {
+//                    fmt.Println("LTrue")// Dummy decision level
+					s.newDecisionLevel()
+                } else if s.LitValue(p) == LFalse {
+//                    fmt.Println("LFalse")
+					s.analyzeFinal(p.Not())
+					return LFalse
+                } else {
+//                    //fmt.Println("break")
+					next = p
+					break
+                }
 			}
+//			fmt.Println("next")
 
 			if next == LitUndef {
 				if debug {
@@ -1055,6 +1076,60 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 
 	return outLearnt, outBtlevel
 }
+
+func (s *Solver) analyzeFinal(p Lit) {
+	if s.decisionLevel() == 0 {
+		return
+	}
+
+	s.conflict[p] = 1
+
+	seen := make(map[Var]byte)
+	seen[p.Var()] = 1
+
+	for i := len(s.trail)-1; i >= s.trailLim[0]; i-- {
+		x := s.trail[i].Var()
+		if seen[x] == 1 {
+			if s.vardata[x].reason == nil {
+				s.conflict[s.trail[i].Not()] = 1
+			} else {
+				c := s.vardata[x].reason
+				//for j := 1; j < len(s.vardata[x].reason); j++ {
+				for j := 1; j < len(c.lits); j++ {
+					//if s.vardata[(s.vardata[x].reason).lit[j].Var()].level > 0 {
+					if s.vardata[c.lits[j].Var()].level > 0 {
+						//seen[(s.vardata[x].reason).lit[j].Var()] = 1
+						seen[c.lits[j].Var()] = 1
+					}
+
+				}
+			}
+			seen[x] = 0
+		}
+	}
+	seen[p.Var()] = 0
+	//fmt.Println("analyzeFinal end")
+}
+
+func (s *Solver) Mem_used() float64 {
+	pid := os.Getpid()
+	name := fmt.Sprintf("/proc/%d/statm", pid)
+	var value int
+	file, err := os.Open(name)
+	if err != nil {
+		panic(err)
+	}
+	defer file.Close()
+	n, err := fmt.Fscanf(file, "%d", &value)
+	n = n +1
+	return float64(value) * float64(os.Getpagesize()) / (1024.0*1024.0)
+}
+
+func (s *Solver) SolveLimited(assumps []Lit) {
+	s.assumptions = make([]Lit, len(assumps))
+	copy(s.assumptions, assumps)
+}
+
 
 // This is used in litRedundant
 type redundantStackElem struct {

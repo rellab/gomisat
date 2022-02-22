@@ -1,0 +1,4 @@
+github.com/mitchellh/go-sat v0.0.0-20170303184941-fc0e735aff48 h1:8CNgGrAIPfSd8voJ/GFH05W5fIMBVyk+14/hkmJKq0c=
+github.com/mitchellh/go-sat v0.0.0-20170303184941-fc0e735aff48/go.mod h1:uhXhhEl/JXgTGt2Cj472ZC62RrS5hfsTMymq2YFvHqc=
+github.com/mitchellh/go-testing-interface v1.14.1 h1:jrgshOhYAUVNMAJiKbEu7EqAwgJJ2JqpQmpLJOu07cU=
+github.com/mitchellh/go-testing-interface v1.14.1/go.mod h1:gfgS7OtZj6MA4U1UrDRp04twqAjfvlZyCfX3sDjEym8=

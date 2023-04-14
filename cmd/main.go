@@ -24,7 +24,7 @@ func main() {
 		s.AddClauseFromCode(x, options)
 	}
 	start := time.Now()
-	s.Simplify()
+	s.Simplify(options)
 	fmt.Println(s.Solve(options))
 	end := time.Now()
 	fmt.Println(s.Conflicts)

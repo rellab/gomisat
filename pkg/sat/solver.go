@@ -6,6 +6,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	_ "sync"
 )
 
 const (
@@ -26,7 +27,7 @@ type SolverOptions struct {
 	RandomVarFreq              float64
 	RandomSeed                 float64
 	LubyRestart                bool
-	CcminMode                  int     // Controls conflict clause minimization (0=none, 1=basic, 2=deep).
+	CCMinMode                  int     // Controls conflict clause minimization (0=none, 1=basic, 2=deep).
 	PhaseSaving                int     // Controls the level of phase saving (0=none, 1=limited, 2=full).
 	RndPol                     bool    // Use random polarities for branching heuristics.
 	RndInitAct                 bool    // Initialize variable activities with a small random value.
@@ -38,6 +39,7 @@ type SolverOptions struct {
 	LearntsizeInc              float64 // The limit for learnt clauses is multiplied with this factor each restart. (default 1.1)
 	LearntsizeAdjustStartConfl float64
 	LearntsizeAdjustInc        float64
+	StrictDetachClause         bool
 }
 
 func DefaultSolverOptions() *SolverOptions {
@@ -48,7 +50,7 @@ func DefaultSolverOptions() *SolverOptions {
 		RandomVarFreq:              0,
 		RandomSeed:                 91648253,
 		LubyRestart:                true,
-		CcminMode:                  2,
+		CCMinMode:                  2,
 		PhaseSaving:                2,
 		RndPol:                     false,
 		RndInitAct:                 false,
@@ -60,6 +62,7 @@ func DefaultSolverOptions() *SolverOptions {
 		LearntsizeInc:              1.1,
 		LearntsizeAdjustStartConfl: 100,
 		LearntsizeAdjustInc:        1.5,
+		StrictDetachClause:         false,
 	}
 }
 
@@ -85,14 +88,14 @@ type Solver struct {
 	trailLim    []int     // Separator indices for different decision levels in 'trail'.
 	assumptions []Lit     // Current set of assumptions provided to solve by the user.
 
-	userPol   map[Var]bool // The users preferred polarity of each variable.
-	activity  []float64    // A heuristic measurement of the activity of a variable.
-	assigns   []LBool      // The current assignments.
-	polarity  []bool       // The preferred polarity of each variable.
-	decision  []bool       // Declares if a variable is eligible for selection in the decision heuristic.
-	vardata   []VarData    // Stores reason and level for each variable.
-	watches   [][]Watcher  // watched[lit] is a list of constraints watching 'lit' (will go there if literal becomes true).
-	orderHeap *VarHeap     // A priority queue of variables ordered with respect to the variable activity.
+	userPol   map[Var]bool  // The users preferred polarity of each variable.
+	activity  []float64     // A heuristic measurement of the activity of a variable.
+	assigns   LitAssignment // The current assignments.
+	polarity  []bool        // The preferred polarity of each variable.
+	decision  []bool        // Declares if a variable is eligible for selection in the decision heuristic.
+	vardata   []VarData     // Stores reason and level for each variable.
+	watches   [][]*Watcher  // watched[lit] is a list of constraints watching 'lit' (will go there if literal becomes true).
+	orderHeap *VarHeap      // A priority queue of variables ordered with respect to the variable activity.
 
 	maxLearnts            float64
 	learntsizeAdjustConfl float64
@@ -113,7 +116,7 @@ type Solver struct {
 	simpDBAssigns int  // Number of top-level assignments since last execution of simplify()
 
 	conflict map[Lit]struct{}
-	model    map[Var]LBool
+	// model    map[Var]bool
 
 	claInc float64 // Amount to bump next clause with
 	varInc float64 // Amount to bump next variable with
@@ -133,17 +136,24 @@ type Solver struct {
 	Conflicts    uint
 	RndDecisions uint
 	Progress     float64
+
+	stack []redundantStackElem
 }
 
 func NewSolver() *Solver {
 	s := &Solver{
+		clauses:           make([]*Clause, 0),
+		learnts:           make([]*Clause, 0),
+		trail:             make([]Lit, 0),
+		trailLim:          make([]int, 0),
+		assumptions:       make([]Lit, 0),
 		activity:          make([]float64, 0),
-		assigns:           make([]LBool, 0),
+		assigns:           make(LitAssignment, 0),
 		polarity:          make([]bool, 0),
 		userPol:           make(map[Var]bool),
 		decision:          make([]bool, 0),
 		vardata:           make([]VarData, 0),
-		watches:           make([][]Watcher, 0),
+		watches:           make([][]*Watcher, 0),
 		releasedVars:      make([]Var, 0),
 		freeVars:          make([]Var, 0),
 		ok:                true,
@@ -156,6 +166,7 @@ func NewSolver() *Solver {
 		asynchInterrupt:   false,
 		claInc:            1,
 		varInc:            1,
+		stack:             make([]redundantStackElem, 0, 10),
 	}
 	s.orderHeap = NewVarHeap(func(x, y Var) bool {
 		return s.activity[x] > s.activity[y]
@@ -193,8 +204,8 @@ func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 		s.polarity[v] = true
 		// s.userPol[v] = upol
 		s.decision[v] = dvar
-		s.watches[v+v] = make([]Watcher, 0)
-		s.watches[v+v+1] = make([]Watcher, 0)
+		s.watches[v+v] = make([]*Watcher, 0)
+		s.watches[v+v+1] = make([]*Watcher, 0)
 		s.orderHeap.indicies[v] = UndefIndex
 		if dvar {
 			s.orderHeap.Insert(v)
@@ -212,8 +223,8 @@ func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 		s.polarity = append(s.polarity, true)
 		// s.userPol = append(s.userPol, upol)
 		s.decision = append(s.decision, dvar)
-		s.watches = append(s.watches, make([]Watcher, 0))
-		s.watches = append(s.watches, make([]Watcher, 0))
+		s.watches = append(s.watches, make([]*Watcher, 0))
+		s.watches = append(s.watches, make([]*Watcher, 0))
 		s.orderHeap.indicies = append(s.orderHeap.indicies, UndefIndex)
 		if dvar {
 			s.orderHeap.Insert(v)
@@ -228,6 +239,25 @@ func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 	return v
 }
 
+func simplifyLiteral(a []LBool, ps []Lit) ([]Lit, bool) {
+	sort.Slice(ps, func(i, j int) bool {
+		return ps[i] < ps[j]
+	})
+	j := 0
+	p := ps[0]
+	for _, x := range ps[1:] {
+		v := a[p.Var()]
+		if v == LTrue || p.Not() == x {
+			return nil, true
+		} else if v != LFalse && p != x {
+			p = x
+			ps[j] = x
+			j++
+		}
+	}
+	return ps[:j], false
+}
+
 func (s *Solver) AddClause(ps ...Lit) bool {
 	if s.ok == false {
 		return false
@@ -238,14 +268,18 @@ func (s *Solver) AddClause(ps ...Lit) bool {
 	j := 0
 	p := LitUndef
 	for i := 0; i < len(ps); i++ {
-		if s.litValue(ps[i]) == LTrue || ps[i] == p.Not() {
+		if s.assigns.IsTrue(ps[i]) || ps[i] == p.Not() {
 			return true
-		} else if s.litValue(ps[i]) != LFalse && ps[i] != p {
+		} else if s.assigns.IsUndef(ps[i]) && ps[i] != p {
 			p, ps[j] = ps[i], ps[i]
 			j++
 		}
 	}
 	ps = ps[:j] // shrink
+	// var ok bool
+	// if ps, ok = simplifyLiteral(s.assigns, ps); ok == true {
+	// 	return true
+	// }
 	switch {
 	case len(ps) == 0:
 		s.ok = false
@@ -280,13 +314,13 @@ func (s *Solver) AddClause(ps ...Lit) bool {
 	}
 }
 
-func (s *Solver) litValue(p Lit) LBool {
-	if p.Sign() == true {
-		return s.assigns[p.Var()].Not()
-	} else {
-		return s.assigns[p.Var()]
-	}
-}
+// func (s *Solver) litValue(p Lit) LBool {
+// 	if p.Sign() == true {
+// 		return s.assigns[p.Var()].Not()
+// 	} else {
+// 		return s.assigns[p.Var()]
+// 	}
+// }
 
 func (s *Solver) decisionLevel() int {
 	return len(s.trailLim)
@@ -320,19 +354,19 @@ func (s *Solver) uncheckedEnqueue(p Lit, c *Clause) {
 	}
 }
 
-func (s *Solver) removeSatisfied(cs []*Clause) []*Clause {
+func (s *Solver) removeSatisfied(cs []*Clause, options *SolverOptions) []*Clause {
 	j := 0
 	for _, c := range cs {
 		if s.Satisfied(c) {
-			s.RemoveClause(c)
+			s.RemoveClause(c, options)
 		} else {
 			// Trim clause
 			if debug && debugAssert {
-				log.Println("removeSatisfied assertion: c.litValue(c.lits[0]) == LUndef && c.litValue(c.lits[1]) == LUndef", (s.litValue(c.lits[0]) != LTrue && s.litValue(c.lits[0]) != LFalse) && (s.litValue(c.lits[1]) != LTrue && s.litValue(c.lits[1]) != LFalse))
+				log.Println("removeSatisfied assertion: c.litValue(c.lits[0]) == LUndef && c.litValue(c.lits[1]) == LUndef", s.assigns.IsUndef(c.lits[0]) && s.assigns.IsUndef(c.lits[1]))
 			}
 			k := 2
 			for k < len(c.lits) {
-				if s.litValue(c.lits[k]) == LFalse {
+				if s.assigns.IsFalse(c.lits[k]) {
 					if debug {
 						log.Println("removeSatisfied: Remove a literal that becomes false", c.lits[k])
 					}
@@ -350,11 +384,11 @@ func (s *Solver) removeSatisfied(cs []*Clause) []*Clause {
 	return cs
 }
 
-func (s *Solver) RemoveClause(c *Clause) {
+func (s *Solver) RemoveClause(c *Clause, options *SolverOptions) {
 	if debug {
 		log.Println("RemoveCluase: Remove the clause", c)
 	}
-	s.DetachClause(c, false)
+	s.DetachClause(c, options)
 	if s.Locked(c) {
 		vdat := s.vardata[c.lits[0].Var()]
 		s.vardata[c.lits[0].Var()] = VarData{reason: nil, level: vdat.level}
@@ -362,8 +396,8 @@ func (s *Solver) RemoveClause(c *Clause) {
 }
 
 func (s *Solver) AttachClause(c *Clause) {
-	s.watches[c.lits[0].Not()] = append(s.watches[c.lits[0].Not()], Watcher{c, c.lits[1]})
-	s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], Watcher{c, c.lits[0]})
+	s.watches[c.lits[0].Not()] = append(s.watches[c.lits[0].Not()], &Watcher{c, c.lits[1]})
+	s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], &Watcher{c, c.lits[0]})
 	if debug {
 		log.Println("AttachClause: Attach a watcher", Watcher{c, c.lits[1]}, "to a literal", c.lits[0].Not())
 		log.Println("AttachClause: Attach a watcher", Watcher{c, c.lits[0]}, "to a literal", c.lits[1].Not())
@@ -373,8 +407,8 @@ func (s *Solver) AttachClause(c *Clause) {
 }
 
 func (s *Solver) AttachLearntClause(c *Clause) {
-	s.watches[c.lits[0].Not()] = append(s.watches[c.lits[0].Not()], Watcher{c, c.lits[1]})
-	s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], Watcher{c, c.lits[0]})
+	s.watches[c.lits[0].Not()] = append(s.watches[c.lits[0].Not()], &Watcher{c, c.lits[1]})
+	s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], &Watcher{c, c.lits[0]})
 	if debug {
 		log.Println("AttachLearntClause: Attach a watcher", Watcher{c, c.lits[1]}, "to a literal", c.lits[0].Not())
 		log.Println("AttachLearntClause: Attach a watcher", Watcher{c, c.lits[0]}, "to a literal", c.lits[1].Not())
@@ -385,16 +419,13 @@ func (s *Solver) AttachLearntClause(c *Clause) {
 
 // Detach a clause to watcher lists. If strict = true, the clause is immediately removed.
 // Otherwise, the clause may be removed when GC runs. The default is strict = false
-func (s *Solver) DetachClause(c *Clause, strict bool) {
-	// TODO: lazy detaching
-	strict = true
-	if strict {
+func (s *Solver) DetachClause(c *Clause, options *SolverOptions) {
+	if options.StrictDetachClause {
 		s.watches[c.lits[0].Not()] = RemoveWatcher(s.watches[c.lits[0].Not()], c) //Watcher{c, c.lits[1]})
 		s.watches[c.lits[1].Not()] = RemoveWatcher(s.watches[c.lits[1].Not()], c) //Watcher{c, c.lits[0]})
 	} else {
-		// // check dirtybit
-		// s.watches.smudge(c.lits[0].Not())
-		// s.watches.smudge(c.lits[1].Not())
+		// check dirtybit
+		c.header.durty = true
 	}
 
 	if c.header.learnt {
@@ -406,7 +437,7 @@ func (s *Solver) DetachClause(c *Clause, strict bool) {
 	}
 }
 
-func RemoveWatcher(ws []Watcher, c *Clause) []Watcher {
+func RemoveWatcher(ws []*Watcher, c *Clause) []*Watcher {
 	j := 0
 	for _, w := range ws {
 		if w.clause != c {
@@ -420,18 +451,78 @@ func RemoveWatcher(ws []Watcher, c *Clause) []Watcher {
 // Return true if a clause is a reason for some implication in the currrent state
 func (s *Solver) Locked(c *Clause) bool {
 	vdat := s.vardata[c.lits[0].Var()]
-	return s.litValue(c.lits[0]) == LTrue && vdat.reason == c
+	return s.assigns.IsTrue(c.lits[0]) && vdat.reason == c
 }
 
 // Return true if a clause is satisfied in the current state
 func (s *Solver) Satisfied(c *Clause) bool {
 	for _, p := range c.lits {
-		if s.litValue(p) == LTrue {
+		if s.assigns.IsTrue(p) {
 			return true
 		}
 	}
 	return false
 }
+
+// func onePropagation(a LitAssignment, queue []Lit, p Lit, ws []*Watcher) ([]Lit, []*Watcher, *Clause) {
+// 		nws := ws[:0]
+// 		for i, w := range ws {
+// 			if debug {
+// 				log.Println("Propagate: Check a watcher", w)
+// 			}
+
+// 			// Try to avoid inspecting the clause
+// 			blocker := w.blocker
+// 			if a.IsTrue(blocker) {
+// 				nws = append(nws, w)
+// 				continue
+// 			}
+
+// 			// Make sure the false literal is data[1]
+// 			c := w.clause
+// 			falseLit := p.Not()
+// 			if c.lits[0] == falseLit {
+// 				c.lits[0], c.lits[1] = c.lits[1], falseLit
+// 			}
+
+// 			// If 0th watch is true, then clause is already satisfied.
+// 			first := c.lits[0]
+// 			w.blocker = first
+// 			if first != blocker && a.IsTrue(first) {
+// 				if debug {
+// 					log.Println("Propagate: Attach a new watcher", w, "to a literal", p)
+// 				}
+// 				nws = append(nws, w)
+// 				continue
+// 			}
+
+// 			// Look for new watch
+// 			for k := 2; k < len(c.lits); k++ {
+// 				if a.IsFalse == false {
+// 					c.lits[1], c.lits[k] = c.lits[k], falseLit
+// 					s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], w)
+// 					if debug {
+// 						log.Println("Propagate: Attach a new watcher", w, "to a literal", c.lits[1].Not())
+// 					}
+// 					goto nextClause
+// 				}
+// 			}
+
+// 			// Did not find watch -- clause is unit under assignment
+// 			nws = append(nws, w)
+
+// 			if a.IsFalse(first) {
+// 				for _, w := range ws[i:] {
+// 					nws = append(nws, w)
+// 				}
+// 				return queue[:0], nws, c
+// 			} else {
+// 				// queue = append(queue, first)s.uncheckedEnqueue(first, c)
+// 			}
+// 		}
+// 		return queue, nws, nil
+// 	}
+// }
 
 // Perform unit propagation. Return possibly conflicting clause.
 // Propagate all enqueued facts. If a conflict arises, the conflicting clause is returned,
@@ -440,6 +531,102 @@ func (s *Solver) Satisfied(c *Clause) bool {
 // Post condition
 //  the propagation queue is empty, even if there was a conflict.
 //
+
+// func (s *Solver) Propagate() *Clause {
+// 	var confl *Clause = nil
+// 	numProps := 0
+
+// 	for s.qhead < len(s.trail) {
+// 		p := s.trail[s.qhead]
+// 		s.qhead++
+// 		ws := s.watches[p]
+// 		numProps++
+// 		if debug {
+// 			log.Println("Propagate: Check an assigned literal", p, " ", ws)
+// 		}
+
+// 		i := 0
+// 		j := 0
+// 		for i < len(ws) {
+// 			if debug {
+// 				log.Println("Propagate: Check a watcher", ws[i])
+// 			}
+
+// 			if ws[i].clause.header.durty {
+// 				i++
+// 				continue
+// 			}
+
+// 			// Try to avoid inspecting the clause
+// 			blocker := ws[i].blocker
+// 			if s.assigns.IsTrue(blocker) {
+// 				ws[j] = ws[i]
+// 				i++
+// 				j++
+// 				continue
+// 			}
+
+// 			// Make sure the false literal is data[1]
+// 			c := ws[i].clause
+// 			falseLit := p.Not()
+// 			if c.lits[0] == falseLit {
+// 				c.lits[0], c.lits[1] = c.lits[1], falseLit
+// 			}
+// 			i++
+
+// 			// If 0th watch is true, then clause is already satisfied.
+// 			first := c.lits[0]
+// 			ws[i-1].blocker = first
+// 			w := ws[i-1] // Watcher{c, first}
+// 			if first != blocker && s.assigns.IsTrue(first) {
+// 				ws[j] = w
+// 				if debug {
+// 					log.Println("Propagate: Attach a new watcher", w, "to a literal", p)
+// 				}
+// 				j++
+// 				continue
+// 			}
+
+// 			// Look for new watch
+// 			for k := 2; k < len(c.lits); k++ {
+// 				if s.assigns.IsFalse(c.lits[k]) == false {
+// 					c.lits[1], c.lits[k] = c.lits[k], falseLit
+// 					s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], w)
+// 					if debug {
+// 						log.Println("Propagate: Attach a new watcher", w, "to a literal", c.lits[1].Not())
+// 					}
+// 					goto nextClause
+// 				}
+// 			}
+
+// 			// Did not find watch -- clause is unit under assignment
+// 			ws[j] = w
+// 			j++
+// 			if s.assigns.IsFalse(first) {
+// 				confl = c
+// 				s.qhead = len(s.trail)
+// 				// copy the remaining watches
+// 				for i < len(ws) {
+// 					ws[j] = ws[i]
+// 					j++
+// 					i++
+// 				}
+// 			} else {
+// 				s.uncheckedEnqueue(first, c)
+// 			}
+
+// 		nextClause:
+// 		}
+// 		if debug {
+// 			log.Printf("Propagate: shrink watchers; lit %s i-j %d\n", p.String(), len(ws)-j)
+// 		}
+// 		s.watches[p] = ws[:j]
+// 	}
+// 	s.Propagations += uint(numProps)
+// 	s.simpDBProps -= int(numProps)
+// 	return confl
+// }
+
 func (s *Solver) Propagate() *Clause {
 	var confl *Clause = nil
 	numProps := 0
@@ -453,44 +640,46 @@ func (s *Solver) Propagate() *Clause {
 			log.Println("Propagate: Check an assigned literal", p, " ", ws)
 		}
 
-		i := 0
-		j := 0
-		for i < len(ws) {
+		nws := ws[:0]
+		for _, w := range ws {
 			if debug {
-				log.Println("Propagate: Check a watcher", ws[i])
+				log.Println("Propagate: Check a watcher", w)
 			}
-			// Try to avoid inspecting the clause
-			blocker := ws[i].blocker
-			if s.litValue(blocker) == LTrue {
-				ws[j] = ws[i]
-				i++
-				j++
+
+			blocker := w.blocker
+			c := w.clause
+
+			switch {
+			case w.clause.header.durty:
+				continue
+			case confl != nil:
+				nws = append(nws, w)
+				continue
+			case s.assigns.IsTrue(blocker):
+				nws = append(nws, w)
 				continue
 			}
 
 			// Make sure the false literal is data[1]
-			c := ws[i].clause
 			falseLit := p.Not()
 			if c.lits[0] == falseLit {
 				c.lits[0], c.lits[1] = c.lits[1], falseLit
 			}
-			i++
 
 			// If 0th watch is true, then clause is already satisfied.
 			first := c.lits[0]
-			w := Watcher{c, first}
-			if first != blocker && s.litValue(first) == LTrue {
-				ws[j] = w
+			w.blocker = first
+			if first != blocker && s.assigns.IsTrue(first) {
+				nws = append(nws, w)
 				if debug {
 					log.Println("Propagate: Attach a new watcher", w, "to a literal", p)
 				}
-				j++
 				continue
 			}
 
 			// Look for new watch
 			for k := 2; k < len(c.lits); k++ {
-				if s.litValue(c.lits[k]) != LFalse {
+				if s.assigns.IsFalse(c.lits[k]) == false {
 					c.lits[1], c.lits[k] = c.lits[k], falseLit
 					s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], w)
 					if debug {
@@ -501,27 +690,21 @@ func (s *Solver) Propagate() *Clause {
 			}
 
 			// Did not find watch -- clause is unit under assignment
-			ws[j] = w
-			j++
-			if s.litValue(first) == LFalse {
+			nws = append(nws, w)
+			if s.assigns.IsFalse(first) {
 				confl = c
 				s.qhead = len(s.trail)
-				// copy the remaining watches
-				for i < len(ws) {
-					ws[j] = ws[i]
-					j++
-					i++
-				}
+				// // copy the remaining watches
+				// for _, w := range ws[i+1:] {
+				// 	nws = append(nws, w)
+				// }
 			} else {
 				s.uncheckedEnqueue(first, c)
 			}
 
 		nextClause:
 		}
-		if debug {
-			log.Printf("Propagate: shrink watchers; lit %s i-j %d\n", p.String(), len(ws)-j)
-		}
-		s.watches[p] = ws[:j]
+		s.watches[p] = nws
 	}
 	s.Propagations += uint(numProps)
 	s.simpDBProps -= int(numProps)
@@ -534,7 +717,7 @@ func (s *Solver) Propagate() *Clause {
 // Currently, the only thing done here is the removal of satisfied clauses, but
 // more things can be put here.
 
-func (s *Solver) Simplify() bool {
+func (s *Solver) Simplify(options *SolverOptions) bool {
 	if s.ok == false || s.Propagate() != nil {
 		s.ok = false
 		return false
@@ -548,8 +731,8 @@ func (s *Solver) Simplify() bool {
 	seen := make(map[Var]struct{})
 
 	// Remove satisfied clauses
-	s.learnts = s.removeSatisfied(s.learnts)
-	s.clauses = s.removeSatisfied(s.clauses)
+	s.learnts = s.removeSatisfied(s.learnts, options)
+	s.clauses = s.removeSatisfied(s.clauses, options)
 
 	if debug {
 		log.Println("Simplify: The released variables: ", s.releasedVars)
@@ -583,8 +766,8 @@ func (s *Solver) Simplify() bool {
 func (s *Solver) rebuildOrderHeap() {
 	vs := make([]Var, 0, s.nextVar)
 	for v := Var(0); v < s.nextVar; v++ {
-		if s.decision[v] && (s.assigns[v] != LTrue && s.assigns[v] != LFalse) {
-			vs = append(vs, Var(v))
+		if s.decision[v] && s.assigns.IsVarUndef(v) {
+			vs = append(vs, v)
 		}
 	}
 	s.orderHeap.Build(vs)
@@ -602,7 +785,9 @@ func resetBase(currRestarts int, options *SolverOptions) int {
 }
 
 func (s *Solver) Solve(options *SolverOptions) (bool, error) {
-	s.model = make(map[Var]LBool)
+	s.trail = make([]Lit, 0, s.nextVar)
+	s.trailLim = make([]int, 0, s.nextVar)
+	model := make(map[Var]bool)
 	s.conflict = make(map[Lit]struct{})
 
 	if s.ok == false {
@@ -631,8 +816,12 @@ func (s *Solver) Solve(options *SolverOptions) (bool, error) {
 		switch {
 		case result == true && err == nil:
 			// Extend & copy model
-			for k, v := range s.assigns {
-				s.model[Var(k)] = v
+			for k, _ := range s.assigns {
+				if s.assigns.IsVarTrue(Var(k)) {
+					model[Var(k)] = true
+				} else if s.assigns.IsVarFalse(Var(k)) {
+					model[Var(k)] = false
+				}
 			}
 			return true, nil
 		case result == false && err == nil:
@@ -718,7 +907,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) (bool, error) 
 			}
 
 			//simplify the set of problem clauses
-			if s.decisionLevel() == 0 && s.Simplify() == false {
+			if s.decisionLevel() == 0 && s.Simplify(options) == false {
 				if debug {
 					log.Println("search: Simplified problem has a conflict (UNSAT)")
 				}
@@ -729,7 +918,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) (bool, error) 
 				if debug {
 					log.Println("search: Reduce the set of learnt clauses", len(s.learnts), len(s.trail), s.maxLearnts)
 				}
-				s.reduceDB()
+				s.reduceDB(options)
 			}
 
 			next := LitUndef
@@ -738,11 +927,11 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) (bool, error) 
 					log.Println("search: Perform user provided assumption")
 				}
 				p := s.assumptions[s.decisionLevel()]
-				switch s.litValue(p) {
-				case LTrue:
+				switch {
+				case s.assigns.IsTrue(p):
 					// Dummy decision level
 					s.newDecisionLevel()
-				case LFalse:
+				case s.assigns.IsFalse(p):
 					//s.analyzeFinal(p.Not(), conflict)
 					return false, nil
 				default:
@@ -780,7 +969,7 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 	// Random decision
 	if drand(&options.RandomSeed) < options.RandomVarFreq && s.orderHeap.IsEmpty() == false {
 		next = s.orderHeap.heap[irand(&options.RandomSeed, len(s.orderHeap.heap))]
-		if (s.assigns[next] != LTrue || s.assigns[next] != LFalse) && s.decision[next] == true {
+		if s.assigns.IsVarUndef(next) && s.decision[next] == true {
 			s.RndDecisions++
 		}
 	}
@@ -792,7 +981,7 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 	if debug && debugOrderHeap {
 		log.Println("pickBranchLit: orderheap at starting activity based decision", s.orderHeap.heap)
 	}
-	for next == VarUndef || s.assigns[next] == LTrue || s.assigns[next] == LFalse || s.decision[next] == false {
+	for next == VarUndef || !s.assigns.IsVarUndef(next) || s.decision[next] == false {
 		if s.orderHeap.IsEmpty() {
 			next = VarUndef
 			break
@@ -856,7 +1045,7 @@ func (s *Solver) progressEstimate() float64 {
 // reduceDB
 // Remove half of the learnt clauses, minus the clauses locked by the current assignment. Locked
 // clauses are clauses that are reason to some assignment. Binary clauses are never removed.
-func (s *Solver) reduceDB() {
+func (s *Solver) reduceDB(options *SolverOptions) {
 	extraLim := s.claInc / float64(len(s.learnts))
 	sort.Slice(s.learnts, func(i, j int) bool {
 		return len(s.learnts[i].lits) > 2 && (len(s.learnts[j].lits) == 2 || s.learnts[i].activity < s.learnts[j].activity)
@@ -867,7 +1056,7 @@ func (s *Solver) reduceDB() {
 	for i := 0; i < len(s.learnts); i++ {
 		c := s.learnts[i]
 		if len(c.lits) > 2 && !s.Locked(c) && (i < len(s.learnts)/2 || c.activity < extraLim) {
-			s.RemoveClause(c)
+			s.RemoveClause(c, options)
 		} else {
 			s.learnts[j] = s.learnts[i]
 			j++
@@ -1016,7 +1205,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 
 	// simplify conflict clause
 	switch {
-	case options.CcminMode == 2:
+	case options.CCMinMode == 2:
 		j := 1
 		for _, p := range outLearnt[1:] {
 			if s.vardata[p.Var()].reason == nil || s.litRedundant(p, seen) == false {
@@ -1027,7 +1216,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 		s.maxLiterals += uint(len(outLearnt))
 		outLearnt = outLearnt[:j]
 		s.totLiterals += uint(len(outLearnt))
-	case options.CcminMode == 1:
+	case options.CCMinMode == 1:
 		j := 1
 		for _, p := range outLearnt[1:] {
 			if c := s.vardata[p.Var()].reason; c == nil {
@@ -1092,7 +1281,7 @@ func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
 		log.Println("litRedundant assertion (reason(var(p)) != nil):", s.vardata[p.Var()].reason != nil)
 	}
 
-	stack := make([]redundantStackElem, 0, 10)
+	stack := s.stack[:0] //make([]redundantStackElem, 0, 10)
 	c := s.vardata[p.Var()].reason
 	i := 1
 	for {

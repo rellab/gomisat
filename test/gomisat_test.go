@@ -5,7 +5,7 @@ import (
 	"com.github/rellab/gomisat/pkg/sat"
 	"fmt"
 	"io"
-	_"log"
+	_ "log"
 	"os"
 	"testing"
 )
@@ -49,7 +49,7 @@ func TestDimacs02(t *testing.T) {
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	result, _ := s.Solve(options)
 	fmt.Println("Result", result)
 }
@@ -64,7 +64,7 @@ func TestDimacs03(t *testing.T) {
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	result, _ := s.Solve(options)
 	fmt.Println("Result", result)
 	// fmt.Println("  ", s.assigns)
@@ -80,7 +80,7 @@ func TestDimacs04(t *testing.T) {
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	result, _ := s.Solve(options)
 	fmt.Println("Result", result)
 	// fmt.Println("  ", s.assigns)
@@ -96,6 +96,6 @@ func TestDimacs05(t *testing.T) {
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	fmt.Println(s.Solve(options))
 }

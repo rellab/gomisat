@@ -16,6 +16,7 @@ type ClauseHeader struct {
 	learnt   bool
 	hasExtra bool
 	reloced  bool
+	durty    bool
 }
 
 type Clause struct {
@@ -39,6 +40,7 @@ func MkClause(ps []Lit, learnt bool) *Clause {
 			learnt:   learnt,
 			hasExtra: false,
 			reloced:  false,
+			durty:    false,
 		},
 		activity: 0.0,
 		abs:      0,

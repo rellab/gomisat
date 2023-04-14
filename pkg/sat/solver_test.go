@@ -56,7 +56,7 @@ func TestSolver05(t *testing.T) {
 	for _, c := range s.clauses {
 		fmt.Println(c)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	fmt.Println(s)
 	fmt.Println(s.ok)
 	fmt.Println(s.assigns)
@@ -91,7 +91,7 @@ func TestSolver07(t *testing.T) {
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	s.search(1, options)
 }
 
@@ -110,6 +110,7 @@ func TestSolver08(t *testing.T) {
 	for _, x := range cs {
 		s.AddClauseFromCode(x, options)
 	}
-	s.Simplify()
+	s.Simplify(options)
 	s.Solve(options)
+	fmt.Println(s.assigns)
 }

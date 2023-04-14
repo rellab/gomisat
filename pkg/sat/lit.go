@@ -103,3 +103,37 @@ func (p Lit) Var() Var {
 func (p Lit) Not() Lit {
 	return p ^ 1
 }
+
+type LitAssignment []LBool
+
+func (a LitAssignment) IsVarTrue(x Var) bool {
+	return a[x] == LTrue
+}
+
+func (a LitAssignment) IsVarFalse(x Var) bool {
+	return a[x] == LFalse
+}
+
+func (a LitAssignment) IsVarUndef(x Var) bool {
+	return a[x] == LUndef || a[x] == 3
+}
+
+func (a LitAssignment) IsTrue(p Lit) bool {
+	if p.Sign() == false {
+		return a[p.Var()] == LTrue
+	} else {
+		return a[p.Var()] == LFalse
+	}
+}
+
+func (a LitAssignment) IsFalse(p Lit) bool {
+	if p.Sign() == false {
+		return a[p.Var()] == LFalse
+	} else {
+		return a[p.Var()] == LTrue
+	}
+}
+
+func (a LitAssignment) IsUndef(p Lit) bool {
+	return a[p.Var()] == LUndef || a[p.Var()] == 3
+}

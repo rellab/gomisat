@@ -3,7 +3,7 @@ package test
 import (
 	"com.github/rellab/gomisat/pkg/dimacs"
 	"com.github/rellab/gomisat/pkg/sat"
-	_"fmt"
+	_ "fmt"
 	"io"
 	"log"
 	"os"
@@ -22,7 +22,7 @@ func BenchmarkDimacs01(b *testing.B) {
 		for _, x := range cs {
 			s.AddClauseFromCode(x, options)
 		}
-		s.Simplify()
+		s.Simplify(options)
 		s.Solve(options)
 	}
 }
@@ -39,7 +39,7 @@ func BenchmarkDimacs02(b *testing.B) {
 		for _, x := range cs {
 			s.AddClauseFromCode(x, options)
 		}
-		s.Simplify()
+		s.Simplify(options)
 		s.Solve(options)
 	}
 }
@@ -56,7 +56,7 @@ func BenchmarkDimacs03(b *testing.B) {
 		for _, x := range cs {
 			s.AddClauseFromCode(x, options)
 		}
-		s.Simplify()
+		s.Simplify(options)
 		s.Solve(options)
 	}
 }

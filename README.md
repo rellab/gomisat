@@ -17,14 +17,16 @@ of scope — in particular, competing on pure SAT performance is not a goal.
 
 The solver decides SAT/UNSAT, reports a model, solves under assumptions and
 reports an UNSAT core, and can be reused across queries. All 2185 SATLIB
-instances in `testdata/satlib` are answered correctly, and 1221 of the 1234
-instances of the larger corpus are decided within 10 s each.
+instances in `testdata/satlib` are answered correctly, and **1222 of the 1234
+instances of the larger corpus are decided within 10 s each**, in 728 s in total.
+Of the twelve that are not, eleven are not decided by CaDiCaL in 60 s either.
 
-Learnt clauses are managed by literal block distance in three tiers; on the
-larger corpus that decides 12 more instances than MiniSat's activity-only policy
-and cuts the total time from 1071 s to 877 s, with a measured 2.1x cost per
-conflict that the next piece of work is meant to remove. Counting is not
-implemented yet; see the phase table and the measurement in DESIGN.md.
+Clauses live in an arena, are deleted lazily, are selected for deletion by
+literal block distance, and the database is reduced on a conflict-driven schedule.
+Every one of those choices is a measurement recorded in
+[DESIGN.md](DESIGN.md#phase-1-second-pass-the-arena-and-the-reduction-schedule),
+and the settings they beat are still switchable. Counting is not implemented yet;
+see the phase table.
 
 ## Usage
 
@@ -83,10 +85,15 @@ in `corpus/manifest.tsv`). It lands in `$GOMISAT_CORPUS`, by default
 `~/.cache/gomisat/corpus`, rather than in the working tree.
 
 ```console
-$ make corpus         # fetch it (idempotent)
-$ make corpus-sweep   # record bench/corpus-t10.csv, checking every decided answer
-$ make corpus-compare # re-run and compare against the recorded results
+$ make corpus          # fetch it (idempotent)
+$ make corpus-sweep    # record the results, checking every decided answer
+$ make corpus-compare  # re-run and compare against the recorded results
+$ make corpus-expected # regenerate corpus/expected.tsv (needs python-sat)
 ```
+
+Answers are checked against `corpus/expected.tsv`, which is ground truth decided
+by CaDiCaL rather than inferred from the family names -- the names turned out to be
+wrong about the Beijing instances.
 
 The regression suite checks four invariants — known status, model validity,
 agreement with exhaustive enumeration (with and without assumptions), and
@@ -101,10 +108,11 @@ cmd/gomibench/   corpus driver: CSV of per-instance results, answer checking, ba
 pkg/gomisat/     the solver
   solver.go        CDCL search, propagation, conflict analysis
   incremental.go   model / core / assumption accessors, budgets, analyzeFinal
-  clause.go        clauses and subsumption
+  clause.go        the clause arena: metadata and literals in two flat arrays
+  lbd.go           literal block distance, clause tiers, reduction schedule
   heap.go          activity-ordered variable heap
   dimacs.go        DIMACS parsing
 testdata/satlib/ committed instances, expected answer encoded in the names
-corpus/          manifest of the larger corpus fetched by scripts/fetch-corpus.sh
+corpus/          manifest of the larger corpus, and the known answer of every instance
 bench/           recorded results
 ```

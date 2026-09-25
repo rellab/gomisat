@@ -7,6 +7,10 @@
 # not committed: fetch them with scripts/fetch-corpus.sh. See DESIGN.md for why
 # the committed testdata corpus is not enough.
 #
+# The expected column is only the claim that comes with the family; the answer
+# actually checked against is corpus/expected.tsv, decided by an independent
+# solver. MIXED means the family holds both, so the name carries no claim.
+#
 # columns: local-dir <TAB> url <TAB> expected <TAB> sha256 <TAB> note
 #
 # Random 3-SAT at the phase transition (ratio 4.26). The workhorse for judging
@@ -37,4 +41,4 @@ sat-ais	Benchmarks/SAT/AIS/ais.tar.gz	SAT	b0b13d9ffd5c645ade40c9e5293ab5522ca57a
 sat-logistics	Benchmarks/SAT/PLANNING/Logistics/logistics.tar.gz	SAT	dcd3b7abfcf25ddf264d46b6ed95ec597eefcdcad88659877812a427c1c576af	planning
 sat-blocksworld	Benchmarks/SAT/PLANNING/BlocksWorld/blocksworld.tar.gz	SAT	f1f2e630f84975857bec6661a459e3bf1220de857fe3b487bcfe1ef8a93ac3a2	planning
 sat-bmc	Benchmarks/SAT/BMC/bmc.tar.gz	SAT	5bda83de61aaa4f7fca7123b259c5d3fc0d6dfe8a22afdf3f09c7530ba3f5330	bounded model checking, up to ~500k clauses
-sat-beijing	Benchmarks/SAT/Bejing/Bejing.tar.gz	SAT	35b11e7b76a85245184eb7763ace8e21cacabbfda19892197b0522a16efeccd7	Beijing competition instances
+mixed-beijing	Benchmarks/SAT/Bejing/Bejing.tar.gz	MIXED	35b11e7b76a85245184eb7763ace8e21cacabbfda19892197b0522a16efeccd7	15 satisfiable, 2bitadd_10 is not

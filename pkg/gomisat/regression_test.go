@@ -472,12 +472,13 @@ func TestSolveResetsAssumptions(t *testing.T) {
 // TestSubsumes covers the clause helper used by the subsumption and
 // vivification work of the next phase.
 func TestSubsumes(t *testing.T) {
-	mk := func(codes ...int64) *Clause {
-		return MkClause(codesToLits(codes), true, false)
+	a := newClauseArena()
+	mk := func(codes ...int64) CRef {
+		return a.alloc(codesToLits(codes), false, true)
 	}
 	tests := []struct {
 		name    string
-		c, d    *Clause
+		c, d    CRef
 		want    Lit
 		wantErr bool
 	}{
@@ -490,7 +491,7 @@ func TestSubsumes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.c.Subsumes(tt.d)
+			got, err := a.subsumes(tt.c, tt.d)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
 			}

@@ -61,9 +61,12 @@ func main() {
 	confBudget := flag.Int64("conflicts", -1, "per-instance conflict limit (negative = no limit)")
 	out := flag.String("o", "", "write the CSV to this file instead of stdout")
 	baseline := flag.String("baseline", "", "compare the run against this CSV")
-	check := flag.Bool("check", false, "verify the answers against the status encoded in the instance names")
+	check := flag.Bool("check", false, "verify the answers against the known status of each instance")
+	expected := flag.String("expected", "", "file of known answers, as produced by scripts/expected-status.py")
 	minTime := flag.Float64("min-time", 0.005, "ignore instances faster than this (seconds) when comparing timings")
 	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
+	reduce := flag.String("reduce", "conflicts", "reduction trigger: conflicts (Glucose), size (MiniSat) or none")
+	protectTier2 := flag.Bool("protect-tier2", false, "keep mid-tier (LBD <= 6) clauses out of the deletion candidates")
 	flag.Parse()
 
 	if flag.NArg() == 0 {
@@ -92,12 +95,22 @@ func main() {
 	}
 	defer closeCSV()
 
+	var truth map[string]string
+	if *expected != "" {
+		truth, err = readExpected(*expected)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gomibench:", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "%d known answers from %s\n", len(truth), *expected)
+	}
+
 	results := make([]result, 0, len(paths))
 	mismatches := 0
 	start := time.Now()
 	lastReport := start
 	for i, path := range paths {
-		r, err := run(path, *timeout, *confBudget, *noLBD)
+		r, err := run(path, *timeout, *confBudget, *noLBD, *reduce, *protectTier2)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gomibench: %s: %v\n", path, err)
 			os.Exit(1)
@@ -116,8 +129,8 @@ func main() {
 		if *check {
 			// UNKNOWN means the instance was not solved within the limits, which
 			// is not a wrong answer. Only a decided answer can contradict.
-			want := expectedStatus(path)
-			if want != "" && r.status != "UNKNOWN" && want != r.status {
+			want := knownStatus(truth, path)
+			if want != "" && want != "UNKNOWN" && r.status != "UNKNOWN" && want != r.status {
 				fmt.Fprintf(os.Stderr, "MISMATCH %s: got %s, want %s\n", r.name, r.status, want)
 				mismatches++
 			}
@@ -174,7 +187,7 @@ func collect(args []string) ([]string, error) {
 	return paths, nil
 }
 
-func run(path string, timeout float64, confBudget int64, noLBD bool) (result, error) {
+func run(path string, timeout float64, confBudget int64, noLBD bool, reduce string, protectTier2 bool) (result, error) {
 	buf, err := os.ReadFile(path)
 	if err != nil {
 		return result{}, err
@@ -187,6 +200,9 @@ func run(path string, timeout float64, confBudget int64, noLBD bool) (result, er
 	s := gomisat.NewSolver()
 	options := gomisat.DefaultSolverOptions()
 	options.UseLBD = noLBD == false
+	options.ReduceByConflicts = reduce == "conflicts"
+	options.NoReduce = reduce == "none"
+	options.ProtectTier2 = protectTier2
 	s.AddCNF(cnf, options)
 	if confBudget >= 0 {
 		s.SetConfBudget(confBudget)
@@ -225,9 +241,50 @@ func run(path string, timeout float64, confBudget int64, noLBD bool) (result, er
 	}, nil
 }
 
-// expectedStatus mirrors the rule used by the regression tests. It is kept here
-// rather than in the library because it describes the test corpus, not the
-// solver.
+// instanceKey identifies an instance by its family directory and file name, so
+// that a table of known answers does not depend on where the corpus lives.
+func instanceKey(path string) string {
+	return filepath.Join(filepath.Base(filepath.Dir(path)), filepath.Base(path))
+}
+
+// readExpected loads a table of known answers: one "<family>/<instance>.cnf",
+// status per line, '#' starting a comment.
+func readExpected(path string) (map[string]string, error) {
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	truth := make(map[string]string, 2048)
+	for _, line := range strings.Split(string(buf), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, "\t")
+		if len(fields) < 2 {
+			continue
+		}
+		truth[instanceKey(fields[0])] = strings.TrimSpace(fields[1])
+	}
+	if len(truth) == 0 {
+		return nil, fmt.Errorf("%s: no answers found", path)
+	}
+	return truth, nil
+}
+
+// knownStatus prefers the table of answers decided by an independent solver and
+// falls back to the claim encoded in the directory name. The fallback is only a
+// claim: the Beijing family is named after what SATLIB says about it and is in
+// fact mixed, which is why the table exists.
+func knownStatus(truth map[string]string, path string) string {
+	if status, ok := truth[instanceKey(path)]; ok {
+		return status
+	}
+	return expectedStatus(path)
+}
+
+// expectedStatus is the fallback rule, derived from the corpus layout rather than
+// from the solver, and only as good as the family names.
 func expectedStatus(path string) string {
 	dir := filepath.Base(filepath.Dir(path))
 	name := filepath.Base(path)

@@ -141,13 +141,14 @@ func (s *Solver) analyzeFinal(p Lit) map[Lit]struct{} {
 		if _, ok := seen[x]; ok == false {
 			continue
 		}
-		if reason := s.vardata[x].reason; reason == nil {
+		if reason := s.vardata[x].reason; reason == CRefUndef {
 			// A decision, hence an assumption: it belongs to the core.
 			outConflict[s.trail[i].Not()] = struct{}{}
 		} else {
-			for j := 1; j < len(reason.lits); j++ {
-				if s.vardata[reason.lits[j].Var()].level > 0 {
-					seen[reason.lits[j].Var()] = struct{}{}
+			lits := s.arena.Lits(reason)
+			for j := 1; j < len(lits); j++ {
+				if s.vardata[lits[j].Var()].level > 0 {
+					seen[lits[j].Var()] = struct{}{}
 				}
 			}
 		}

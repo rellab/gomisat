@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	"github.com/rellab/gomisat/pkg/gomisat"
@@ -17,6 +18,7 @@ import (
 func main() {
 	model := flag.Bool("model", false, "print the satisfying assignment as a DIMACS v-line")
 	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
+	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile to this file")
 	timeout := flag.Float64("timeout", 0, "wall clock limit in seconds (0 = no limit)")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -45,9 +47,29 @@ func main() {
 		defer timer.Stop()
 	}
 
+	// The profile has to be stopped explicitly: this command exits through
+	// os.Exit to report the answer in its status, which skips deferred calls.
+	stopProfile := func() {}
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "gomisat:", err)
+			os.Exit(1)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintln(os.Stderr, "gomisat:", err)
+			os.Exit(1)
+		}
+		stopProfile = func() {
+			pprof.StopCPUProfile()
+			f.Close()
+		}
+	}
+
 	start := time.Now()
 	status := s.Solve(options)
 	elapsed := time.Since(start)
+	stopProfile()
 
 	fmt.Printf("c vars %d clauses %d\n", s.NumVars(), len(cnf.Clauses))
 	fmt.Printf("c conflicts %d propagations %d decisions %d restarts %d\n",

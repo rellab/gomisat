@@ -49,50 +49,70 @@ func TestLBDIsWellFormed(t *testing.T) {
 		t.Fatal("no learnt clause survived, nothing to check")
 	}
 	for _, c := range s.learnts {
-		if c.lbd < 1 || c.lbd > len(c.lits) {
-			t.Fatalf("clause %v has lbd %d, which is outside 1..%d", c, c.lbd, len(c.lits))
+		lbd, size := s.arena.LBD(c), s.arena.Size(c)
+		if lbd < 1 || lbd > size {
+			t.Fatalf("clause %v has lbd %d, which is outside 1..%d", s.arena.String(c), lbd, size)
 		}
-		if want := tierOf(c.lbd, options); c.tier != want && c.tier < want {
+		if want := tierOf(lbd, options); s.arena.meta[c].tier < want {
 			// A clause may sit in a better tier than its current LBD suggests
 			// only through promotion, never in a worse one.
-			t.Fatalf("clause with lbd %d is in tier %v, want at least %v", c.lbd, c.tier, want)
+			t.Fatalf("clause with lbd %d is in tier %v, want at least %v", lbd, s.arena.meta[c].tier, want)
 		}
 	}
 }
 
-// TestReduceDBKeepsProtectedClauses pins the deletion policy: binary, locked and
-// core clauses survive a reduction, and the local tier loses half of itself.
+// TestReduceDBKeepsProtectedClauses pins the deletion policy: core, binary and
+// locked clauses survive a reduction, and half of the remaining candidates go.
+// It runs both tier protection settings, because which one is better is a
+// measurement and the loser has to keep working.
 func TestReduceDBKeepsProtectedClauses(t *testing.T) {
-	options := DefaultSolverOptions()
-	path := filepath.Join(satlibDir, "unsat-dimacs-dubois", "dubois100.cnf")
-	s := solveInstance(t, path, options)
+	for _, protectTier2 := range []bool{false, true} {
+		name := "protect-tier2=false"
+		if protectTier2 {
+			name = "protect-tier2=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			options := DefaultSolverOptions()
+			options.ProtectTier2 = protectTier2
+			path := filepath.Join(satlibDir, "unsat-dimacs-dubois", "dubois100.cnf")
+			s := solveInstance(t, path, options)
 
-	protected := make(map[*Clause]bool)
-	local := 0
-	for _, c := range s.learnts {
-		switch {
-		case len(c.lits) <= 2 || c.tier != tierLocal || s.Locked(c):
-			protected[c] = true
-		default:
-			local++
-		}
-	}
-	before := len(s.learnts)
-	removed := s.reduceDBTiered(options)
-	if want := local / 2; removed != want {
-		t.Errorf("removed %d clauses, want %d (half of the %d local ones)", removed, want, local)
-	}
-	if got := len(s.learnts); got != before-removed {
-		t.Errorf("database holds %d clauses, want %d", got, before-removed)
-	}
-	survived := make(map[*Clause]bool, len(s.learnts))
-	for _, c := range s.learnts {
-		survived[c] = true
-	}
-	for c := range protected {
-		if survived[c] == false {
-			t.Fatalf("a protected clause was deleted: %v tier=%v lbd=%d", c, c.tier, c.lbd)
-		}
+			isProtected := func(c CRef) bool {
+				m := &s.arena.meta[c]
+				if int(m.size) <= 2 || s.Locked(c) || m.tier == tierCore {
+					return true
+				}
+				return protectTier2 && m.tier == tierMid
+			}
+
+			protected := make(map[CRef]bool)
+			candidates := 0
+			for _, c := range s.learnts {
+				if isProtected(c) {
+					protected[c] = true
+					continue
+				}
+				candidates++
+			}
+			before := len(s.learnts)
+			removed := s.reduceDBTiered(options)
+			if want := candidates / 2; removed != want {
+				t.Errorf("removed %d clauses, want %d (half of the %d candidates)", removed, want, candidates)
+			}
+			if got := len(s.learnts); got != before-removed {
+				t.Errorf("database holds %d clauses, want %d", got, before-removed)
+			}
+			survived := make(map[CRef]bool, len(s.learnts))
+			for _, c := range s.learnts {
+				survived[c] = true
+			}
+			for c := range protected {
+				if survived[c] == false {
+					t.Fatalf("a protected clause was deleted: tier=%v lbd=%d size=%d",
+						s.arena.meta[c].tier, s.arena.LBD(c), s.arena.Size(c))
+				}
+			}
+		})
 	}
 }
 

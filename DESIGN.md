@@ -72,7 +72,7 @@ and gomisat's own fresh-WMC mode.
 | phase | content | status |
 | --- | --- | --- |
 | 0 | public API for repeated queries, regression and benchmark infrastructure | done |
-| 1 | minimum-modern CDCL: LBD + tiered learnt-clause management (**done**, measured below), restart policy, vivification and basic inprocessing | in progress |
+| 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, clause arena, conflict-driven reduction schedule (**done**, measured below); restart policy, vivification and basic inprocessing still open | in progress |
 | 2 | component decomposition + component cache | |
 | 3 | weighted model counting | |
 | 4 | repeated-query API + persistent cache across calls | |
@@ -82,8 +82,38 @@ and gomisat's own fresh-WMC mode.
 Phase 1 stops deliberately. Chronological backtracking, proof logging and
 bounded variable elimination are all worth having, but none of them is on the
 path to phase 5; they get picked up only when a measurement says they block
-progress. The clause arena allocator was on that list until the LBD measurement
-below promoted it: it is now the largest single lever available.
+progress. The clause arena was promoted onto the path by a measurement in the
+same way, and then the measurement said its value lies in making deletion cheap
+rather than in propagation -- see the second pass below.
+
+## The clause arena
+
+Clauses used to be individual heap objects holding a slice of literals, and
+watchers, reasons and the clause lists held pointers to them. A watcher visit
+that could not be skipped by its blocking literal therefore cost two dependent
+loads into unrelated memory: one for the clause object, one for its literal
+array.
+
+They now live in one arena (`clause.go`):
+
+	meta []clauseMeta   fixed-size part, 24 bytes, indexed by CRef
+	lits []Lit          every clause's literals, contiguous
+
+A `CRef` is an index into `meta`, and **it never changes**. That is the whole
+point of the design. MiniSat's `CRef` is an offset into the literal store itself,
+so compacting the store moves every clause and MiniSat has to walk all watchers,
+all reasons and all clause lists to relocate them. Here compaction rewrites only
+`lits` and updates `meta[i].begin`; nothing outside the arena refers to a literal
+position, so nothing outside the arena has to be touched. Deleted clauses give
+their `meta` slot back through a free list, and their literals become waste that
+the next compaction drops.
+
+The cost of the split is that reading a clause is two array indexings rather than
+one. Both are into large contiguous arrays, which is the point.
+
+One rule comes with it: the slice returned by `Lits` aliases the literal store,
+so it must not be held across an `alloc` or a `compact`. Propagation deliberately
+writes through it when it reorders watched literals.
 
 ## Corpus
 
@@ -103,11 +133,19 @@ they are reproducible from the pinned checksums in the manifest, and they are
 fetched into `$GOMISAT_CORPUS` (default `~/.cache/gomisat/corpus`), outside the
 repository, which lives in a synced folder.
 
-The expected answer is carried by the local directory name (`sat-` / `unsat-`
-prefix), which is the same rule the regression suite uses for the committed data,
-so `gomibench -check` validates the corpus and the solver at once. An instance
-that is not decided within the limits is reported as UNKNOWN and is not counted
-as a wrong answer.
+Ground truth for the external corpus is `corpus/expected.tsv`, one status per
+instance, produced by `scripts/expected-status.py`, which decides every instance
+with CaDiCaL through pysat and parses DIMACS itself rather than reusing the Go
+parser. The directory names still carry a claim (`sat-` / `unsat-` prefix) and
+`gomibench -check` falls back to it, but the table is what it prefers, because the
+claim turned out to be wrong: the Beijing family is mixed, and `2bitadd_10` is
+unsatisfiable. That only surfaced once the solver became fast enough to decide the
+instance at all -- before that it timed out and no check could fire. An instance
+neither the solver nor the oracle decides is reported as UNKNOWN and is not
+counted as a wrong answer.
+
+The lesson is worth keeping: a corpus labelled from the same assumptions as the
+solver checks nothing. The oracle has to be independent.
 
 ## Phase 1: measured effect of LBD and tiered clause management
 
@@ -143,9 +181,15 @@ Three things to take from this.
 **It works, and it works on the unsatisfiable side.** UNSAT median time 0.832
 (234 instances faster, 58 slower); SAT median 1.005 (169 faster, 174 slower, with
 large variance in both directions, which is what satisfiable random instances do).
-The mechanism is visible directly: on `uuf250-01` the activity-only policy retains
-**133** learnt clauses and needs 600 680 conflicts, while the tiered policy retains
-4724 and needs 129 640. MiniSat's reduction was simply throwing away too much.
+
+**Correction.** The explanation first written here -- that the activity-only policy
+retains only 133 learnt clauses on `uuf250-01` and therefore forgets too much --
+was wrong. That count was an artefact of the `RemoveSatisfied` defect listed
+above: `s.learnts` was emptied at every simplification, so the number was the
+count since the last one and the real database was unbounded in the watch lists.
+The A/B figures above are still what the code did, but the mechanism they were
+attributed to is not the one that was operating. The measurement is redone below
+on the repaired solver.
 
 **The win is capped by a 2.1x cost per conflict.** Conflicts fall by a median
 factor of 0.61 but wall time only to 0.95, because the retained database is an
@@ -166,6 +210,85 @@ Any claim about structured instances needs harder ones than SATLIB provides.
 `hole9` is no longer solved within 10 s). Pigeonhole is exponential for resolution
 whatever the clause management, and low-LBD clauses are not the useful ones there.
 It is recorded rather than fixed.
+
+## Phase 1, second pass: the arena and the reduction schedule
+
+The first pass measured a solver whose clause bookkeeping was broken, so its
+numbers said nothing about the policies they were attributed to. This pass starts
+from the repaired solver and settles four questions by measurement. All of it is
+on the external corpus, 10 s per instance, answers checked against
+`corpus/expected.tsv`.
+
+**Which reduction trigger?** With the LBD tiers held fixed, on the 200 instances
+of `uuf225-960` and `uf250-1065`:
+
+| trigger | solved | total |
+| --- | --- | --- |
+| never reduce | 172 | 737 s |
+| MiniSat: database against a growing budget | 141 | 1262 s |
+| **Glucose: a conflict count that grows after every reduction** | **197** | **451 s** |
+
+MiniSat's trigger is the worst of the three -- worse than never deleting at all.
+It is a comparison against a budget that itself keeps growing, so it fires late
+and irregularly, and when it does fire it takes half the database by activity.
+
+**What does deletion cost?** Once deletion actually happens, `RemoveClause`
+searching two watch lists for the clause dominates: a reduction deletes thousands
+of clauses at a time. Deleting lazily instead -- flag the clause, let propagation
+drop the entries it meets, sweep the rest during collection, and only then reuse
+the metadata slot -- took the same 200 instances from 451 s to 387 s, a median of
+0.830 per instance. The defective code had hidden this entirely by almost never
+deleting anything, which is why repairing the bookkeeping first looked like a
+regression.
+
+**Where is the time?** A profile of `uuf225-01` put 67 % in propagation, as
+expected, and then something unexpected: about a seventh of the run in Go map
+operations, because `analyze` allocated a `map[Var]byte` per conflict. Replacing
+it with an array indexed by variable, with only the touched entries reset, and
+folding the sign into `LitValue` arithmetically, made the solver about 1.6x
+faster **without changing the search by one step** -- identical conflicts,
+propagations and decisions:
+
+| instance | before | after |
+| --- | --- | --- |
+| `uuf225-01` | 1.60 s | 1.05 s |
+| `uuf250-01` | 5.29 s | 3.32 s |
+| `uf250-068` | 0.103 s | 0.061 s |
+
+The arena itself is not where the time was: `Lits` is 2.7 % of the profile and
+`Dead` 1.4 %, and the whole reduction path including the watch sweep and the
+literal compaction is 1.4 %. The arena earns its place by making deletion and
+compaction cheap enough to do often, not by speeding up propagation.
+
+**How protective should the tiers be?** The tiers as first written kept every
+clause with LBD <= 6 out of the deletion candidates while it was in use. On the
+300 hardest instances (`uuf225`, `uf250`, `uuf250`):
+
+| clause management | solved | total | median conflicts vs activity |
+| --- | --- | --- | --- |
+| activity only, Glucose trigger | 299 | 549 s | 1.000 |
+| LBD tiers, mid tier protected | 296 | 687 s | 1.085 |
+| **LBD tiers, only the core tier protected** | **299** | **541 s** | **0.841** |
+
+Protecting the mid tier protects most of the database on random 3-SAT, and then
+the tiers cost time and buy nothing: the same search, 25 % slower. With only the
+core tier safe, the LBD ordering does what it is supposed to do -- 16 % fewer
+conflicts than activity ordering -- for a small time win. That is the shipped
+default (`UseLBD`, `ReduceByConflicts`, `ProtectTier2` off), and the losing
+settings stay switchable because they are the arms of this measurement.
+
+**Where that leaves the solver.** Over the whole corpus, in the shipped
+configuration:
+
+|  | instances decided | total time |
+| --- | --- | --- |
+| before this pass (defective bookkeeping) | 1206 | 864 s |
+| **after** | **1222 of 1234** | **728 s** |
+
+Median time per instance 0.733 of what it was. Twelve instances are left
+undecided within 10 s: the ten `par32` instances and `hole10`, which CaDiCaL does
+not decide in 60 s either, and `uuf250-087`. That last one is the only instance in
+the corpus where a modern solver succeeds and this one does not.
 
 ## Invariants
 
@@ -213,6 +336,23 @@ path on the committed test data hid them.
   literal instead of checking the remaining ones, and `findLit` reported a
   negated occurrence as an exact one. Unused until subsumption and vivification
   arrive in phase 1.
+- `RemoveSatisfied` truncated the clause list to the number of *deleted* clauses
+  instead of to the survivors: `cs[:len(cs)-j]` where MiniSat's `cs.shrink(i-j)`
+  means `cs[:j]`. A simplification with nothing to delete therefore emptied the
+  list. The solver still answered correctly, because the watch lists hold the
+  clauses independently of `s.clauses` and `s.learnts`, which is why 3419
+  instances did not notice. The damage was elsewhere: `s.learnts` was emptied at
+  every simplification, so `reduceDB` could not see the clauses it was supposed
+  to delete and the learnt database grew without bound in the watch lists.
+- `Simplify` kept exactly the trail literals whose variable had been *released*,
+  where MiniSat keeps the ones that have not been. Since variables are never
+  released here the set is empty, so the root-level trail was emptied at every
+  simplification.
+- `litRedundant` descended into a recursive check with
+  `i, p, c = 0, l, s.vardata[p.Var()].reason`. Go evaluates the whole right-hand
+  side before assigning, so the reason taken was the one of the old `p`, not of
+  `l`; the C++ original assigns sequentially and gets the reason of `l`. Conflict
+  clause minimisation was therefore walking the wrong clause.
 - The DIMACS parser read one clause per line. DIMACS is a stream of integers
   terminated by 0, and a clause may span lines; the SATLIB inductive inference
   family does exactly that (`ii8a1.cnf` declares 186 clauses over 384 lines).
@@ -225,13 +365,14 @@ path on the committed test data hid them.
 
 ## Known gaps
 
-- **No clause arena allocator.** Clauses are allocated individually and the
-  watcher lists hold pointers. The LBD measurement above puts a number on what
-  that costs: 2.1x the wall time per conflict once the database is allowed to
-  grow. This is the next thing to do.
-- **The reduction schedule is MiniSat's**, triggered by a comparison against a
-  growing size budget rather than by a conflict counter, so the database size is
-  not actually bounded. Glucose's schedule belongs with the arena work.
+- **Propagation is now 67 % of the run**, and `LitValue` alone is a third of it:
+  two dependent loads per watcher visit, one for the metadata and one for the
+  literals. Halving their size by making `Var` and `Lit` 32-bit would shrink a
+  watcher to 8 bytes and the literal store by half; that is the next measurable
+  lever on cost per conflict.
+- **The restart policy is still MiniSat's Luby sequence.** Given how much the
+  reduction schedule mattered, this is the obvious next policy to measure, and it
+  is the remaining item of phase 1.
 - **The committed corpus cannot measure search changes**, only correctness: all
   2185 instances together take under 0.8 s. The external corpus covers this, but
   it too runs out of difficulty on structured families, where the conflict ratio

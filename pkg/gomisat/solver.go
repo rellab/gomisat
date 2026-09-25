@@ -1,7 +1,7 @@
 package gomisat
 
 import (
-	_ "fmt"
+	"fmt"
 	"log"
 	"math"
 	"sort"
@@ -41,6 +41,24 @@ type SolverOptions struct {
 	LBDCore     int    // clauses at or below this LBD are never deleted
 	LBDTier2    int    // clauses at or below this LBD are kept while in use
 	Tier2MaxAge uint64 // conflicts a mid-tier clause may go unused before demotion
+
+	// Reduction schedule. With ReduceByConflicts the database is reduced after a
+	// number of conflicts that grows by ReduceInc after every reduction, as
+	// Glucose does. Without it the trigger is MiniSat's: reduce when the database
+	// outgrows a budget that itself keeps growing, which does not bound the
+	// database. Kept switchable because which one wins is a measurement, not an
+	// opinion.
+	ReduceByConflicts bool
+	ReduceFirst       uint64
+	ReduceInc         uint64
+	// ProtectTier2 keeps the mid tier out of the deletion candidates while it is
+	// still in use. Glucose only protects the core tier and takes half of
+	// everything else, which is what the measurement prefers here.
+	ProtectTier2 bool
+	// NoReduce keeps every learnt clause. Useless as a setting, but it is the
+	// arm that tells whether deleting clauses at all is what costs on a given
+	// family.
+	NoReduce bool
 }
 
 func DefaultSolverOptions() *SolverOptions {
@@ -67,30 +85,37 @@ func DefaultSolverOptions() *SolverOptions {
 		LBDCore:                    2,
 		LBDTier2:                   6,
 		Tier2MaxAge:                30000,
+		ReduceByConflicts:          true,
+		ProtectTier2:               false,
+		ReduceFirst:                2000,
+		ReduceInc:                  300,
 	}
 }
 
 type VarData struct {
-	reason *Clause
+	reason CRef
 	level  int
 }
 
-// TODO: Make watcher manager to delete unused clauses by GC
+// Watcher is an entry of a watch list. It holds a clause reference rather than a
+// pointer, and a blocking literal that lets propagation skip the clause without
+// touching it at all.
 type Watcher struct {
-	clause  *Clause
+	cref    CRef
 	blocker Lit
 }
 
 func (w Watcher) String() string {
-	return "[" + w.clause.String() + ", blocker " + w.blocker.String() + "]"
+	return "[clause " + fmt.Sprint(uint32(w.cref)) + ", blocker " + w.blocker.String() + "]"
 }
 
 type Solver struct {
-	clauses     []*Clause // List of problem clauses.
-	learnts     []*Clause // List of learnt clauses.
-	trail       []Lit     // Assignment stack; stores all assigments made in the order they were made.
-	trailLim    []int     // Separator indices for different decision levels in 'trail'.
-	assumptions []Lit     // Current set of assumptions provided to solve by the user.
+	arena       *clauseArena // Owns every clause; see clause.go.
+	clauses     []CRef       // List of problem clauses.
+	learnts     []CRef       // List of learnt clauses.
+	trail       []Lit        // Assignment stack; stores all assigments made in the order they were made.
+	trailLim    []int        // Separator indices for different decision levels in 'trail'.
+	assumptions []Lit        // Current set of assumptions provided to solve by the user.
 
 	userPol   map[Var]bool // The users preferred polarity of each variable.
 	activity  []float64    // A heuristic measurement of the activity of a variable.
@@ -131,6 +156,18 @@ type Solver struct {
 	lbdStamp      []uint64
 	lbdGeneration uint64
 
+	// Conflict analysis scratch space, indexed by variable. Kept on the solver
+	// because analyze used to allocate a map per conflict, which the profile put
+	// at about a seventh of the whole run.
+	//   0: not seen  1: source  2: removable  3: failed
+	seen        []uint8
+	seenToClear []Var
+
+	// Reduction schedule (lbd.go): the conflict count at which the next
+	// reduction is due, and the interval that produced it.
+	reduceAt       uint64
+	reduceInterval uint64
+
 	nextVar      Var
 	releasedVars []Var
 	freeVars     []Var
@@ -150,12 +187,15 @@ type Solver struct {
 
 func NewSolver() *Solver {
 	s := &Solver{
+		arena:             newClauseArena(),
 		activity:          make([]float64, 0),
 		assigns:           make([]LBool, 0),
 		polarity:          make([]bool, 0),
 		userPol:           make(map[Var]bool),
 		decision:          make([]bool, 0),
 		vardata:           make([]VarData, 0),
+		seen:              make([]uint8, 0),
+		seenToClear:       make([]Var, 0, 64),
 		watches:           make([][]Watcher, 0),
 		releasedVars:      make([]Var, 0),
 		freeVars:          make([]Var, 0),
@@ -198,7 +238,8 @@ func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 		v = s.freeVars[n-1]
 		s.freeVars = s.freeVars[:n-1]
 		s.assigns[v] = LUndef
-		s.vardata[v] = VarData{reason: nil, level: 0}
+		s.vardata[v] = VarData{reason: CRefUndef, level: 0}
+		s.seen[v] = 0
 		if options.RndInitAct {
 			s.activity[v] = drand(&options.RandomSeed) * 0.00001
 		} else {
@@ -217,7 +258,8 @@ func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 		v = s.nextVar
 		s.nextVar++
 		s.assigns = append(s.assigns, LUndef)
-		s.vardata = append(s.vardata, VarData{reason: nil, level: 0})
+		s.vardata = append(s.vardata, VarData{reason: CRefUndef, level: 0})
+		s.seen = append(s.seen, 0)
 		if options.RndInitAct {
 			s.activity = append(s.activity, drand(&options.RandomSeed)*0.00001)
 		} else {
@@ -267,8 +309,8 @@ func (s *Solver) AddClause(ps ...Lit) bool {
 		}
 		return false
 	} else if len(ps) == 1 {
-		s.UncheckedEnqueue(ps[0], nil)
-		if confl := s.Propagate(); confl == nil {
+		s.UncheckedEnqueue(ps[0], CRefUndef)
+		if confl := s.Propagate(); hasConflict(confl) == false {
 			if debug {
 				log.Println("AddClause: ps becomes a single literal", ps, "conflict of propagation", confl)
 			}
@@ -283,7 +325,7 @@ func (s *Solver) AddClause(ps ...Lit) bool {
 		}
 	} else {
 		// set clause
-		c := MkClause(ps, true, false)
+		c := s.arena.alloc(ps, false, true)
 		s.clauses = append(s.clauses, c)
 		s.AttachClause(c)
 		if debug {
@@ -293,12 +335,12 @@ func (s *Solver) AddClause(ps ...Lit) bool {
 	}
 }
 
+// LitValue is the value of a literal under the current assignment. The sign is
+// folded in arithmetically, as in MiniSat, which is why LUndef has two
+// representations (2 and 3); no caller compares against LUndef directly, they
+// test against LTrue and LFalse.
 func (s *Solver) LitValue(p Lit) LBool {
-	if p.Sign() == true {
-		return s.assigns[p.Var()].Not()
-	} else {
-		return s.assigns[p.Var()]
-	}
+	return s.assigns[p.Var()] ^ LBool(p&1)
 }
 
 func (s *Solver) decisionLevel() int {
@@ -324,7 +366,7 @@ func luby(y float64, x int) float64 {
 	return math.Pow(y, float64(seq))
 }
 
-func (s *Solver) UncheckedEnqueue(p Lit, c *Clause) {
+func (s *Solver) UncheckedEnqueue(p Lit, c CRef) {
 	s.assigns[p.Var()] = NewLBool(!p.Sign())
 	s.vardata[p.Var()] = VarData{reason: c, level: s.decisionLevel()}
 	s.trail = append(s.trail, p)
@@ -333,103 +375,101 @@ func (s *Solver) UncheckedEnqueue(p Lit, c *Clause) {
 	}
 }
 
-func (s *Solver) RemoveSatisfied(cs []*Clause) []*Clause {
+// RemoveSatisfied deletes the clauses satisfied at the root level and strips the
+// literals that are already false from the ones that remain. It returns the list
+// of surviving clauses.
+func (s *Solver) RemoveSatisfied(cs []CRef) []CRef {
 	j := 0
 	for _, c := range cs {
 		if s.Satisfied(c) {
 			s.RemoveClause(c)
-		} else {
-			// Trim clause
-			if debug && debugAssert {
-				log.Println("RemoveSatisfied assertion: c.LitValue(c.lits[0]) == LUndef && c.LitValue(c.lits[1]) == LUndef", (s.LitValue(c.lits[0]) != LTrue && s.LitValue(c.lits[0]) != LFalse) && (s.LitValue(c.lits[1]) != LTrue && s.LitValue(c.lits[1]) != LFalse))
-			}
-			for k := 2; k < len(c.lits); k++ {
-				if s.LitValue(c.lits[k]) == LFalse {
-					if debug {
-						log.Println("RemoveSatisfied: Remove a literal that becomes false", c.lits[k])
-					}
-					c.lits[k] = c.lits[len(c.lits)-1]
-					c.lits = c.lits[:len(c.lits)-1]
-				}
-			}
-			cs[j] = c
-			j++
+			continue
 		}
+		// Trim the clause. Only literals beyond the two watched ones may go.
+		lits := s.arena.Lits(c)
+		for k := 2; k < len(lits); k++ {
+			if s.LitValue(lits[k]) == LFalse {
+				if debug {
+					log.Println("RemoveSatisfied: Remove a literal that becomes false", lits[k])
+				}
+				lits[k] = lits[len(lits)-1]
+				lits = lits[:len(lits)-1]
+				s.arena.shrink(c, 1)
+				// The literal moved into position k has not been looked at yet.
+				k--
+			}
+		}
+		cs[j] = c
+		j++
 	}
-	cs = cs[:len(cs)-j]
-	return cs
+	// Keep the survivors. The original code truncated to the number of deleted
+	// clauses instead, which emptied the list whenever nothing was satisfied.
+	return cs[:j]
 }
 
-func (s *Solver) RemoveClause(c *Clause) {
+// RemoveClause deletes a clause. The watch lists are not searched for it: the
+// clause is flagged, propagation drops the entries it meets, and collectGarbage
+// sweeps whatever is left. Detaching strictly, which is what this used to do,
+// costs a linear scan of two watch lists per deleted clause, and a reduction
+// deletes thousands at a time.
+func (s *Solver) RemoveClause(c CRef) {
 	if debug {
-		log.Println("RemoveCluase: Remove the clause", c)
+		log.Println("RemoveCluase: Remove the clause", s.arena.String(c))
 	}
-	s.DetachClause(c, false)
 	if s.Locked(c) {
-		vdat := s.vardata[c.lits[0].Var()]
-		s.vardata[c.lits[0].Var()] = VarData{reason: nil, level: vdat.level}
+		v := s.arena.Lits(c)[0].Var()
+		s.vardata[v] = VarData{reason: CRefUndef, level: s.vardata[v].level}
 	}
-}
-
-func (s *Solver) AttachClause(c *Clause) {
-	s.watches[c.lits[0].Not()] = append(s.watches[c.lits[0].Not()], Watcher{c, c.lits[1]})
-	s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], Watcher{c, c.lits[0]})
-	if debug {
-		log.Println("AttachClause: Attach a watcher", Watcher{c, c.lits[1]}, "to a literal", c.lits[0].Not())
-		log.Println("AttachClause: Attach a watcher", Watcher{c, c.lits[0]}, "to a literal", c.lits[1].Not())
+	if s.arena.markDead(c) == false {
+		return
 	}
-	if c.header.learnt {
-		s.numLearntes++
-		s.learntsLiterals += uint64(len(c.lits))
-	} else {
-		s.numClauses++
-		s.clausesLiterals += uint64(len(c.lits))
-	}
-}
-
-// Detach a clause to watcher lists. If strict = true, the clause is immediately removed.
-// Otherwise, the clause may be removed when GC runs. The default is strict = false
-func (s *Solver) DetachClause(c *Clause, strict bool) {
-	// TODO: lazy detaching
-	strict = true
-	if strict {
-		s.watches[c.lits[0].Not()] = RemoveWatcher(s.watches[c.lits[0].Not()], Watcher{c, c.lits[1]})
-		s.watches[c.lits[1].Not()] = RemoveWatcher(s.watches[c.lits[1].Not()], Watcher{c, c.lits[0]})
-	} else {
-		// // check dirtybit
-		// s.watches.smudge(c.lits[0].Not())
-		// s.watches.smudge(c.lits[1].Not())
-	}
-
-	if c.header.learnt {
+	size := uint64(s.arena.Size(c))
+	if s.arena.Learnt(c) {
 		s.numLearntes--
-		s.learntsLiterals -= uint64(len(c.lits))
+		s.learntsLiterals -= size
 	} else {
 		s.numClauses--
-		s.clausesLiterals -= uint64(len(c.lits))
+		s.clausesLiterals -= size
 	}
 }
 
-func RemoveWatcher(ws []Watcher, w Watcher) []Watcher {
-	j := 0
-	for i := 0; i < len(ws); i++ {
-		if ws[i].clause != w.clause {
+// sweepWatches drops every watcher of a deleted clause.
+func (s *Solver) sweepWatches() {
+	for p, ws := range s.watches {
+		j := 0
+		for i := 0; i < len(ws); i++ {
+			if s.arena.Dead(ws[i].cref) {
+				continue
+			}
 			ws[j] = ws[i]
 			j++
 		}
+		s.watches[p] = ws[:j]
 	}
-	return ws[:j]
+}
+
+func (s *Solver) AttachClause(c CRef) {
+	lits := s.arena.Lits(c)
+	s.watches[lits[0].Not()] = append(s.watches[lits[0].Not()], Watcher{c, lits[1]})
+	s.watches[lits[1].Not()] = append(s.watches[lits[1].Not()], Watcher{c, lits[0]})
+	if s.arena.Learnt(c) {
+		s.numLearntes++
+		s.learntsLiterals += uint64(len(lits))
+	} else {
+		s.numClauses++
+		s.clausesLiterals += uint64(len(lits))
+	}
 }
 
 // Return true if a clause is a reason for some implication in the currrent state
-func (s *Solver) Locked(c *Clause) bool {
-	vdat := s.vardata[c.lits[0].Var()]
-	return s.LitValue(c.lits[0]) == LTrue && vdat.reason == c
+func (s *Solver) Locked(c CRef) bool {
+	first := s.arena.Lits(c)[0]
+	return s.LitValue(first) == LTrue && s.vardata[first.Var()].reason == c
 }
 
 // Return true if a clause is satisfied in the current state
-func (s *Solver) Satisfied(c *Clause) bool {
-	for _, lit := range c.lits {
+func (s *Solver) Satisfied(c CRef) bool {
+	for _, lit := range s.arena.Lits(c) {
 		if s.LitValue(lit) == LTrue {
 			return true
 		}
@@ -444,8 +484,8 @@ func (s *Solver) Satisfied(c *Clause) bool {
 // Post condition
 //
 //	the propagation queue is empty, even if there was a conflict.
-func (s *Solver) Propagate() *Clause {
-	var confl *Clause = nil
+func (s *Solver) Propagate() CRef {
+	confl := CRefUndef
 	numProps := 0
 
 	for s.qhead < len(s.trail) {
@@ -463,6 +503,13 @@ func (s *Solver) Propagate() *Clause {
 			if debug {
 				log.Println("Propagate: Check a watcher", ws[i])
 			}
+			// A deleted clause is dropped from the list here rather than by
+			// searching for it when it was deleted.
+			if s.arena.Dead(ws[i].cref) {
+				i++
+				continue
+			}
+
 			// Try to avoid inspecting the clause
 			blocker := ws[i].blocker
 			if s.LitValue(blocker) == LTrue {
@@ -472,16 +519,17 @@ func (s *Solver) Propagate() *Clause {
 				continue
 			}
 
-			// Make sure the false literal is data[1]
-			c := ws[i].clause
+			// Make sure the false literal is lits[1]
+			c := ws[i].cref
+			lits := s.arena.Lits(c)
 			falseLit := p.Not()
-			if c.lits[0] == falseLit {
-				c.lits[0], c.lits[1] = c.lits[1], falseLit
+			if lits[0] == falseLit {
+				lits[0], lits[1] = lits[1], falseLit
 			}
 			i++
 
 			// If 0th watch is true, then clause is already satisfied.
-			first := c.lits[0]
+			first := lits[0]
 			w := Watcher{c, first}
 			if first != blocker && s.LitValue(first) == LTrue {
 				ws[j] = w
@@ -493,13 +541,10 @@ func (s *Solver) Propagate() *Clause {
 			}
 
 			// Look for new watch
-			for k := 2; k < len(c.lits); k++ {
-				if s.LitValue(c.lits[k]) != LFalse {
-					c.lits[1], c.lits[k] = c.lits[k], falseLit
-					s.watches[c.lits[1].Not()] = append(s.watches[c.lits[1].Not()], w)
-					if debug {
-						log.Println("Propagate: Attach a new watcher", w, "to a literal", c.lits[1].Not())
-					}
+			for k := 2; k < len(lits); k++ {
+				if s.LitValue(lits[k]) != LFalse {
+					lits[1], lits[k] = lits[k], falseLit
+					s.watches[lits[1].Not()] = append(s.watches[lits[1].Not()], w)
 					goto nextClause
 				}
 			}
@@ -532,6 +577,9 @@ func (s *Solver) Propagate() *Clause {
 	return confl
 }
 
+// hasConflict reports whether a propagation result is a conflict.
+func hasConflict(c CRef) bool { return c != CRefUndef }
+
 //
 // simplify
 // Simplify the clause database according to the current top-level assignment.
@@ -539,7 +587,7 @@ func (s *Solver) Propagate() *Clause {
 // more things can be put here.
 
 func (s *Solver) Simplify() bool {
-	if s.ok == false || s.Propagate() != nil {
+	if s.ok == false || hasConflict(s.Propagate()) {
 		s.ok = false
 		return false
 	}
@@ -564,9 +612,11 @@ func (s *Solver) Simplify() bool {
 			seen[v] = struct{}{}
 		}
 
+		// Keep the literals whose variable was *not* released. The original
+		// condition was inverted, which emptied the root-level trail.
 		j := 0
 		for _, lit := range s.trail {
-			if _, ok := seen[lit.Var()]; ok {
+			if _, released := seen[lit.Var()]; released == false {
 				s.trail[j] = lit
 				j++
 			}
@@ -576,7 +626,7 @@ func (s *Solver) Simplify() bool {
 		s.freeVars = append(s.freeVars, s.releasedVars...)
 		s.releasedVars = s.releasedVars[:0]
 	}
-	// checkGarbage()
+	s.collectGarbage()
 	s.rebuildOrderHeap()
 
 	s.simpDBAssigns = len(s.trail)
@@ -695,7 +745,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 
 	// for k := 0; k < 5; k++ { // for test
 	for {
-		if confl := s.Propagate(); confl != nil {
+		if confl := s.Propagate(); hasConflict(confl) {
 			if debug {
 				log.Println("search: Find a conflict", confl)
 			}
@@ -711,9 +761,9 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 			}
 
 			if len(learntClause) == 1 {
-				s.UncheckedEnqueue(learntClause[0], nil)
+				s.UncheckedEnqueue(learntClause[0], CRefUndef)
 			} else {
-				c := MkClause(learntClause, false, true) // learnt: ture
+				c := s.arena.alloc(learntClause, true, false)
 				s.noteLearnt(c, lbd, options)
 				s.learnts = append(s.learnts, c)
 				s.AttachClause(c)
@@ -754,16 +804,11 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				return LFalse
 			}
 
-			if float64(len(s.learnts)-len(s.trail)) >= s.maxLearnts {
+			if s.reductionDue(options) {
 				if debug {
 					log.Println("search: Reduce the set of learnt clauses", len(s.learnts), len(s.trail), s.maxLearnts)
 				}
-				if s.reduceDB(options) == 0 {
-					// Nothing could be deleted, because the protected tiers fill
-					// the budget. Raise the budget instead of calling this at
-					// every conflict from now on.
-					s.maxLearnts *= options.LearntsizeInc
-				}
+				s.reduceDB(options)
 			}
 
 			next := LitUndef
@@ -810,7 +855,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				log.Println("search: Increase decision level and enqueue next", next)
 			}
 			s.newDecisionLevel()
-			s.UncheckedEnqueue(next, nil)
+			s.UncheckedEnqueue(next, CRefUndef)
 		}
 	}
 }
@@ -905,9 +950,13 @@ func (s *Solver) reduceDB(options *SolverOptions) int {
 	if options.UseLBD {
 		return s.reduceDBTiered(options)
 	}
-	extraLim := s.claInc / float64(len(s.learnts))
+	if len(s.learnts) == 0 {
+		return 0
+	}
+	extraLim := float32(s.claInc / float64(len(s.learnts)))
 	sort.Slice(s.learnts, func(i, j int) bool {
-		return len(s.learnts[i].lits) > 2 && (len(s.learnts[j].lits) == 2 || s.learnts[i].activity < s.learnts[j].activity)
+		mi, mj := &s.arena.meta[s.learnts[i]], &s.arena.meta[s.learnts[j]]
+		return mi.size > 2 && (mj.size == 2 || mi.activity < mj.activity)
 	})
 	// Do not delete binary or locked clauses. From the rest, delete clauses from the first half
 	// and clauses with activity smaller than extraLim
@@ -915,7 +964,8 @@ func (s *Solver) reduceDB(options *SolverOptions) int {
 	removed := 0
 	for i := 0; i < len(s.learnts); i++ {
 		c := s.learnts[i]
-		if len(c.lits) > 2 && !s.Locked(c) && (i < len(s.learnts)/2 || c.activity < extraLim) {
+		m := &s.arena.meta[c]
+		if m.size > 2 && !s.Locked(c) && (i < len(s.learnts)/2 || m.activity < extraLim) {
 			s.RemoveClause(c)
 			removed++
 		} else {
@@ -927,7 +977,7 @@ func (s *Solver) reduceDB(options *SolverOptions) int {
 	if debug {
 		log.Println("reduceDB: The number of new learnts", j)
 	}
-	// checkGarbage()
+	s.collectGarbage()
 	return removed
 }
 
@@ -936,12 +986,13 @@ func (s *Solver) withinBudget() bool {
 }
 
 // Increase a clause with the current bump value
-func (s *Solver) claBumpActivity(c *Clause) {
-	c.activity += s.claInc
-	if c.activity > 1e20 {
+func (s *Solver) claBumpActivity(c CRef) {
+	m := &s.arena.meta[c]
+	m.activity += float32(s.claInc)
+	if m.activity > 1e20 {
 		// rescale
-		for i, _ := range s.learnts {
-			s.learnts[i].activity *= 1e-20
+		for _, c := range s.learnts {
+			s.arena.meta[c].activity *= 1e-20
 		}
 		s.claInc *= 1e-20
 	}
@@ -1005,37 +1056,36 @@ func (s *Solver) cancelUntil(level int, options *SolverOptions) {
 //   - If outLearnt.size() > 1 then outLearnt[1] has the greatest decision level of the
 //     rest of literals. There may be others from the same level through.
 
-func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int, int) {
+func (s *Solver) analyze(c CRef, options *SolverOptions) ([]Lit, int, int) {
 	pathC := 0
 	p := LitUndef
-	outLearnt := make([]Lit, 1, len(c.lits)) // outLeant[0] will be put at the end of this function
-
-	seen := make(map[Var]byte)
+	outLearnt := make([]Lit, 1, s.arena.Size(c)) // outLeant[0] will be put at the end of this function
 
 	// Generate conflict clause
 	index := len(s.trail) - 1
 	for {
-		if c.header.learnt {
+		if s.arena.Learnt(c) {
 			s.claBumpActivity(c)
 			s.noteUsed(c, options)
 		}
 
+		lits := s.arena.Lits(c)
 		var j int
 		if p == LitUndef {
 			j = 0
 		} else {
 			j = 1
 		}
-		for ; j < len(c.lits); j++ {
-			v := c.lits[j].Var()
-			if _, ok := seen[v]; ok == false {
+		for ; j < len(lits); j++ {
+			v := lits[j].Var()
+			if s.seen[v] == 0 {
 				if s.vardata[v].level > 0 {
 					s.varBumpActivity(v)
-					seen[v] = 1
+					s.markSeen(v, 1)
 					if s.vardata[v].level >= s.decisionLevel() {
 						pathC++
 					} else {
-						outLearnt = append(outLearnt, c.lits[j])
+						outLearnt = append(outLearnt, lits[j])
 					}
 				}
 			}
@@ -1043,9 +1093,9 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int, int) {
 
 		for {
 			p = s.trail[index]
-			if _, ok := seen[p.Var()]; ok {
+			if s.seen[p.Var()] != 0 {
 				c = s.vardata[p.Var()].reason
-				delete(seen, p.Var())
+				s.seen[p.Var()] = 0
 				break
 			} else {
 				index--
@@ -1071,7 +1121,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int, int) {
 		j := 1
 		for i := 1; i < len(outLearnt); i++ {
 			p := outLearnt[i]
-			if s.vardata[p.Var()].reason == nil || s.litRedundant(p, seen) == false {
+			if s.vardata[p.Var()].reason == CRefUndef || s.litRedundant(p) == false {
 				outLearnt[j] = p
 				j++
 			}
@@ -1083,13 +1133,14 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int, int) {
 		j := 1
 		for i := 1; i < len(outLearnt); i++ {
 			p := outLearnt[i]
-			if c := s.vardata[p.Var()].reason; c == nil {
+			if c := s.vardata[p.Var()].reason; c == CRefUndef {
 				outLearnt[j] = p
 				j++
 			} else {
-				for k := 1; k < len(c.lits); k++ {
-					v := c.lits[k].Var()
-					if _, ok := seen[v]; ok == false && s.vardata[v].level > 0 {
+				lits := s.arena.Lits(c)
+				for k := 1; k < len(lits); k++ {
+					v := lits[k].Var()
+					if s.seen[v] == 0 && s.vardata[v].level > 0 {
 						outLearnt[j] = p
 						j++
 						break
@@ -1124,7 +1175,25 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int, int) {
 
 	// The LBD has to be measured here, before the caller backjumps: after that
 	// the decision levels no longer describe the trail this clause came from.
-	return outLearnt, outBtlevel, s.computeLBD(outLearnt)
+	lbd := s.computeLBD(outLearnt)
+	s.clearSeen()
+	return outLearnt, outBtlevel, lbd
+}
+
+// markSeen records a value in the analysis scratch space and remembers the
+// variable so that clearSeen can reset only what was touched.
+func (s *Solver) markSeen(v Var, value uint8) {
+	if s.seen[v] == 0 {
+		s.seenToClear = append(s.seenToClear, v)
+	}
+	s.seen[v] = value
+}
+
+func (s *Solver) clearSeen() {
+	for _, v := range s.seenToClear {
+		s.seen[v] = 0
+	}
+	s.seenToClear = s.seenToClear[:0]
 }
 
 // This is used in litRedundant
@@ -1134,7 +1203,7 @@ type redundantStackElem struct {
 }
 
 // Check if p can be removed from a conflict clause
-func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
+func (s *Solver) litRedundant(p Lit) bool {
 	// seen
 	//   0: undef (key does not exist)
 	//   1: seen_source
@@ -1143,40 +1212,46 @@ func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
 	//
 
 	if debug && debugAssert {
-		log.Println("litRedundant assertion (seen[var(p)] == seen_undef || seen[var(p)] == seen_source):", seen[p.Var()] == 0 || seen[p.Var()] == 1)
-		log.Println("litRedundant assertion (reason(var(p)) != nil):", s.vardata[p.Var()].reason != nil)
+		log.Println("litRedundant assertion (seen[var(p)] == seen_undef || seen[var(p)] == seen_source):", s.seen[p.Var()] == 0 || s.seen[p.Var()] == 1)
+		log.Println("litRedundant assertion (reason(var(p)) != CRefUndef):", s.vardata[p.Var()].reason != CRefUndef)
 	}
 
 	stack := make([]redundantStackElem, 0, 10)
 	c := s.vardata[p.Var()].reason
 	i := 1
 	for {
-		if i < len(c.lits) {
-			l := c.lits[i]
+		lits := s.arena.Lits(c)
+		if i < len(lits) {
+			l := lits[i]
 
 			// Variable at level 0 or previsouly removable
-			if s.vardata[l.Var()].level == 0 || seen[l.Var()] == 1 || seen[l.Var()] == 2 {
+			if s.vardata[l.Var()].level == 0 || s.seen[l.Var()] == 1 || s.seen[l.Var()] == 2 {
 				goto nextLoop
 			}
 
 			// Check variable cannot be removed for some local reason
-			if s.vardata[l.Var()].reason == nil || seen[l.Var()] == 3 {
+			if s.vardata[l.Var()].reason == CRefUndef || s.seen[l.Var()] == 3 {
 				stack = append(stack, redundantStackElem{0, p})
 				for _, ss := range stack {
-					if _, ok := seen[ss.l.Var()]; ok == false {
-						seen[ss.l.Var()] = 3
+					if s.seen[ss.l.Var()] == 0 {
+						s.markSeen(ss.l.Var(), 3)
 					}
 				}
 				return false
 			}
 
-			// Recursively check l
+			// Recursively check l.
+			// NOTE: the reason has to be the one of l. Go evaluates the whole
+			// right-hand side before assigning, so writing this as a single
+			// parallel assignment would take the reason of the old p, unlike the
+			// sequential assignments of the C++ original.
 			stack = append(stack, redundantStackElem{i, p})
-			i, p, c = 0, l, s.vardata[p.Var()].reason
+			i, p = 0, l
+			c = s.vardata[l.Var()].reason
 		} else {
 			// Finished with current element p and reason c
-			if _, ok := seen[p.Var()]; ok == false {
-				seen[p.Var()] = 2
+			if s.seen[p.Var()] == 0 {
+				s.markSeen(p.Var(), 2)
 			}
 
 			// Terminate with success if stack is empty

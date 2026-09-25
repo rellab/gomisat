@@ -63,6 +63,7 @@ func main() {
 	baseline := flag.String("baseline", "", "compare the run against this CSV")
 	check := flag.Bool("check", false, "verify the answers against the status encoded in the instance names")
 	minTime := flag.Float64("min-time", 0.005, "ignore instances faster than this (seconds) when comparing timings")
+	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
 	flag.Parse()
 
 	if flag.NArg() == 0 {
@@ -81,29 +82,49 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The CSV is written as the run proceeds: a sweep over a large corpus takes
+	// long enough that losing everything to an interruption matters, and the
+	// partial file is useful on its own.
+	w, closeCSV, err := openCSV(*out)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gomibench:", err)
+		os.Exit(1)
+	}
+	defer closeCSV()
+
 	results := make([]result, 0, len(paths))
 	mismatches := 0
 	start := time.Now()
-	for _, path := range paths {
-		r, err := run(path, *timeout, *confBudget)
+	lastReport := start
+	for i, path := range paths {
+		r, err := run(path, *timeout, *confBudget, *noLBD)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gomibench: %s: %v\n", path, err)
 			os.Exit(1)
 		}
 		results = append(results, r)
+		if err := w.Write(r.row()); err != nil {
+			fmt.Fprintln(os.Stderr, "gomibench:", err)
+			os.Exit(1)
+		}
+		w.Flush()
+		if time.Since(lastReport) > 15*time.Second {
+			fmt.Fprintf(os.Stderr, "  %d/%d  %.0fs elapsed  last %s %s %.2fs\n",
+				i+1, len(paths), time.Since(start).Seconds(), filepath.Base(r.name), r.status, r.seconds)
+			lastReport = time.Now()
+		}
 		if *check {
-			if want := expectedStatus(path); want != "" && want != r.status {
+			// UNKNOWN means the instance was not solved within the limits, which
+			// is not a wrong answer. Only a decided answer can contradict.
+			want := expectedStatus(path)
+			if want != "" && r.status != "UNKNOWN" && want != r.status {
 				fmt.Fprintf(os.Stderr, "MISMATCH %s: got %s, want %s\n", r.name, r.status, want)
 				mismatches++
 			}
 		}
 	}
 	elapsed := time.Since(start)
-
-	if err := writeCSV(*out, results); err != nil {
-		fmt.Fprintln(os.Stderr, "gomibench:", err)
-		os.Exit(1)
-	}
+	closeCSV()
 
 	solved := 0
 	for _, r := range results {
@@ -153,21 +174,20 @@ func collect(args []string) ([]string, error) {
 	return paths, nil
 }
 
-func run(path string, timeout float64, confBudget int64) (result, error) {
+func run(path string, timeout float64, confBudget int64, noLBD bool) (result, error) {
 	buf, err := os.ReadFile(path)
 	if err != nil {
 		return result{}, err
 	}
-	clauses, err := gomisat.ParseDimacs(buf)
+	cnf, err := gomisat.ParseDimacsCNF(buf)
 	if err != nil {
 		return result{}, err
 	}
 
 	s := gomisat.NewSolver()
 	options := gomisat.DefaultSolverOptions()
-	for _, c := range clauses {
-		s.AddClauseFromCode(c, options)
-	}
+	options.UseLBD = noLBD == false
+	s.AddCNF(cnf, options)
 	if confBudget >= 0 {
 		s.SetConfBudget(confBudget)
 	}
@@ -195,7 +215,7 @@ func run(path string, timeout float64, confBudget int64) (result, error) {
 	return result{
 		name:         path,
 		vars:         s.NumVars(),
-		clauses:      len(clauses),
+		clauses:      len(cnf.Clauses),
 		status:       name,
 		conflicts:    s.Conflicts,
 		propagations: s.Propagations,
@@ -224,30 +244,38 @@ func expectedStatus(path string) string {
 	return ""
 }
 
-func writeCSV(path string, results []result) error {
+// openCSV returns a writer for the results plus a function that flushes and
+// closes it; calling the latter twice is harmless.
+func openCSV(path string) (*csv.Writer, func(), error) {
 	f := os.Stdout
+	closeFile := func() {}
 	if path != "" {
-		var err error
-		if err = os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
+		if dir := filepath.Dir(path); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				return nil, nil, err
+			}
 		}
-		f, err = os.Create(path)
+		created, err := os.Create(path)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		defer f.Close()
+		f = created
+		closeFile = func() { created.Close() }
 	}
 	w := csv.NewWriter(f)
-	defer w.Flush()
 	if err := w.Write(csvHeader); err != nil {
-		return err
+		return nil, nil, err
 	}
-	for _, r := range results {
-		if err := w.Write(r.row()); err != nil {
-			return err
+	w.Flush()
+	done := false
+	return w, func() {
+		if done {
+			return
 		}
-	}
-	return nil
+		done = true
+		w.Flush()
+		closeFile()
+	}, nil
 }
 
 // compare reports how the run moved relative to a baseline: the median time

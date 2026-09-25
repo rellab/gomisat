@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"sync/atomic"
 )
 
 const (
@@ -32,6 +33,14 @@ type SolverOptions struct {
 	LearntsizeInc              float64 // The limit for learnt clauses is multiplied with this factor each restart. (default 1.1)
 	LearntsizeAdjustStartConfl float64
 	LearntsizeAdjustInc        float64
+
+	// Literal block distance and tiered management of learnt clauses (lbd.go).
+	// With UseLBD false the solver reduces the clause database by activity only,
+	// as MiniSat does, which is what the LBD work is measured against.
+	UseLBD      bool
+	LBDCore     int    // clauses at or below this LBD are never deleted
+	LBDTier2    int    // clauses at or below this LBD are kept while in use
+	Tier2MaxAge uint64 // conflicts a mid-tier clause may go unused before demotion
 }
 
 func DefaultSolverOptions() *SolverOptions {
@@ -54,6 +63,10 @@ func DefaultSolverOptions() *SolverOptions {
 		LearntsizeInc:              1.1,
 		LearntsizeAdjustStartConfl: 100,
 		LearntsizeAdjustInc:        1.5,
+		UseLBD:                     true,
+		LBDCore:                    2,
+		LBDTier2:                   6,
+		Tier2MaxAge:                30000,
 	}
 }
 
@@ -113,13 +126,18 @@ type Solver struct {
 	claInc float64 // Amount to bump next clause with
 	varInc float64 // Amount to bump next variable with
 
+	// Generation-stamped scratch space for computing the literal block distance
+	// without allocating; see lbd.go.
+	lbdStamp      []uint64
+	lbdGeneration uint64
+
 	nextVar      Var
 	releasedVars []Var
 	freeVars     []Var
 
 	conflictBudget    int64
 	propagationBudget int64
-	asynchInterrupt   bool
+	asynchInterrupt   atomic.Bool // written by Interrupt, polled by withinBudget
 
 	Solves       uint64
 	Starts       uint64
@@ -149,7 +167,6 @@ func NewSolver() *Solver {
 		nextVar:           0,
 		conflictBudget:    -1,
 		propagationBudget: -1,
-		asynchInterrupt:   false,
 		claInc:            1,
 		varInc:            1,
 	}
@@ -171,8 +188,9 @@ func (s *Solver) setDecisionVar(v Var, b bool) {
 }
 
 // Add a new variable with parameters specifying variable mode.
-//   upol: Assinged value for a variable. The default is LUndef
-//   dvar: Indicator whether a variable is to be determined. The default is true.
+//
+//	upol: Assinged value for a variable. The default is LUndef
+//	dvar: Indicator whether a variable is to be determined. The default is true.
 func (s *Solver) NewVar(dvar bool, options *SolverOptions) Var {
 	var v Var
 	n := len(s.freeVars)
@@ -424,8 +442,8 @@ func (s *Solver) Satisfied(c *Clause) bool {
 // otherwise nil (CRef_Undef)
 //
 // Post condition
-//  the propagation queue is empty, even if there was a conflict.
 //
+//	the propagation queue is empty, even if there was a conflict.
 func (s *Solver) Propagate() *Clause {
 	var confl *Clause = nil
 	numProps := 0
@@ -666,10 +684,10 @@ func (s *Solver) solve(options *SolverOptions) LBool {
 // Note: Use negative value for nof_conflicts indicate infinity
 //
 // Output
-//  LTrue if a partial assigment that is consistent with respect to the clauseset if found.
-//  If all variables are decision variables, this means that the clause set is satisfiable.
-//  LFalse if the clause set is insatisfiable. LUndef if the bound on number of conflicts is reached.
 //
+//	LTrue if a partial assigment that is consistent with respect to the clauseset if found.
+//	If all variables are decision variables, this means that the clause set is satisfiable.
+//	LFalse if the clause set is insatisfiable. LUndef if the bound on number of conflicts is reached.
 func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 	// backtranckLevel := 0
 	conflictC := 0
@@ -686,7 +704,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 			if s.decisionLevel() == 0 {
 				return LFalse
 			}
-			learntClause, backtranckLevel := s.analyze(confl, options)
+			learntClause, backtranckLevel, lbd := s.analyze(confl, options)
 			s.cancelUntil(backtranckLevel, options)
 			if debug {
 				log.Println("Propagete: The result of analyze", learntClause, backtranckLevel)
@@ -696,6 +714,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				s.UncheckedEnqueue(learntClause[0], nil)
 			} else {
 				c := MkClause(learntClause, false, true) // learnt: ture
+				s.noteLearnt(c, lbd, options)
 				s.learnts = append(s.learnts, c)
 				s.AttachClause(c)
 				s.claBumpActivity(c)
@@ -739,7 +758,12 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				if debug {
 					log.Println("search: Reduce the set of learnt clauses", len(s.learnts), len(s.trail), s.maxLearnts)
 				}
-				s.reduceDB()
+				if s.reduceDB(options) == 0 {
+					// Nothing could be deleted, because the protected tiers fill
+					// the budget. Raise the budget instead of calling this at
+					// every conflict from now on.
+					s.maxLearnts *= options.LearntsizeInc
+				}
 			}
 
 			next := LitUndef
@@ -875,7 +899,12 @@ func (s *Solver) progressEstimate() float64 {
 // reduceDB
 // Remove half of the learnt clauses, minus the clauses locked by the current assignment. Locked
 // clauses are clauses that are reason to some assignment. Binary clauses are never removed.
-func (s *Solver) reduceDB() {
+// reduceDB shrinks the learnt clause database and reports how many clauses it
+// deleted.
+func (s *Solver) reduceDB(options *SolverOptions) int {
+	if options.UseLBD {
+		return s.reduceDBTiered(options)
+	}
 	extraLim := s.claInc / float64(len(s.learnts))
 	sort.Slice(s.learnts, func(i, j int) bool {
 		return len(s.learnts[i].lits) > 2 && (len(s.learnts[j].lits) == 2 || s.learnts[i].activity < s.learnts[j].activity)
@@ -883,10 +912,12 @@ func (s *Solver) reduceDB() {
 	// Do not delete binary or locked clauses. From the rest, delete clauses from the first half
 	// and clauses with activity smaller than extraLim
 	j := 0
+	removed := 0
 	for i := 0; i < len(s.learnts); i++ {
 		c := s.learnts[i]
 		if len(c.lits) > 2 && !s.Locked(c) && (i < len(s.learnts)/2 || c.activity < extraLim) {
 			s.RemoveClause(c)
+			removed++
 		} else {
 			s.learnts[j] = s.learnts[i]
 			j++
@@ -897,10 +928,11 @@ func (s *Solver) reduceDB() {
 		log.Println("reduceDB: The number of new learnts", j)
 	}
 	// checkGarbage()
+	return removed
 }
 
 func (s *Solver) withinBudget() bool {
-	return !s.asynchInterrupt && (s.conflictBudget < 0 || s.Conflicts < uint64(s.conflictBudget)) && (s.propagationBudget < 0 || s.Propagations < uint64(s.propagationBudget))
+	return !s.asynchInterrupt.Load() && (s.conflictBudget < 0 || s.Conflicts < uint64(s.conflictBudget)) && (s.propagationBudget < 0 || s.Propagations < uint64(s.propagationBudget))
 }
 
 // Increase a clause with the current bump value
@@ -915,7 +947,6 @@ func (s *Solver) claBumpActivity(c *Clause) {
 	}
 }
 
-//
 func (s *Solver) varBumpActivity(v Var) {
 	s.activity[v] += s.varInc
 	if s.activity[v] > 1e100 {
@@ -974,7 +1005,7 @@ func (s *Solver) cancelUntil(level int, options *SolverOptions) {
 //   - If outLearnt.size() > 1 then outLearnt[1] has the greatest decision level of the
 //     rest of literals. There may be others from the same level through.
 
-func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
+func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int, int) {
 	pathC := 0
 	p := LitUndef
 	outLearnt := make([]Lit, 1, len(c.lits)) // outLeant[0] will be put at the end of this function
@@ -986,6 +1017,7 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 	for {
 		if c.header.learnt {
 			s.claBumpActivity(c)
+			s.noteUsed(c, options)
 		}
 
 		var j int
@@ -1090,7 +1122,9 @@ func (s *Solver) analyze(c *Clause, options *SolverOptions) ([]Lit, int) {
 		outBtlevel = maxlevel
 	}
 
-	return outLearnt, outBtlevel
+	// The LBD has to be measured here, before the caller backjumps: after that
+	// the decision levels no longer describe the trail this clause came from.
+	return outLearnt, outBtlevel, s.computeLBD(outLearnt)
 }
 
 // This is used in litRedundant

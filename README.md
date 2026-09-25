@@ -17,8 +17,14 @@ of scope — in particular, competing on pure SAT performance is not a goal.
 
 The solver decides SAT/UNSAT, reports a model, solves under assumptions and
 reports an UNSAT core, and can be reused across queries. All 2185 SATLIB
-instances in `testdata/satlib` are answered correctly. Counting is not
-implemented yet; see the phase table in DESIGN.md.
+instances in `testdata/satlib` are answered correctly, and 1221 of the 1234
+instances of the larger corpus are decided within 10 s each.
+
+Learnt clauses are managed by literal block distance in three tiers; on the
+larger corpus that decides 12 more instances than MiniSat's activity-only policy
+and cuts the total time from 1071 s to 877 s, with a measured 2.1x cost per
+conflict that the next piece of work is meant to remove. Counting is not
+implemented yet; see the phase table and the measurement in DESIGN.md.
 
 ## Usage
 
@@ -66,9 +72,20 @@ for _, assumptions := range queries {
 
 ```console
 $ make check        # go vet + the regression suite on a sample of each family
-$ make test-full    # the same suite over all 2185 instances
-$ make bench-suite  # sweep the corpus, verify answers, compare times to bench/baseline.csv
+$ make test-full    # the same suite over all 2185 committed instances
+$ make bench-suite  # sweep the committed corpus, verify answers, compare to bench/baseline.csv
 $ make baseline     # record a new bench/baseline.csv
+```
+
+The committed instances are too easy to judge a change to the search by, so the
+harder corpus is fetched separately (about 99 MB, from SATLIB, pinned by checksum
+in `corpus/manifest.tsv`). It lands in `$GOMISAT_CORPUS`, by default
+`~/.cache/gomisat/corpus`, rather than in the working tree.
+
+```console
+$ make corpus         # fetch it (idempotent)
+$ make corpus-sweep   # record bench/corpus-t10.csv, checking every decided answer
+$ make corpus-compare # re-run and compare against the recorded results
 ```
 
 The regression suite checks four invariants — known status, model validity,
@@ -87,6 +104,7 @@ pkg/gomisat/     the solver
   clause.go        clauses and subsumption
   heap.go          activity-ordered variable heap
   dimacs.go        DIMACS parsing
-testdata/satlib/ SATLIB instances with the expected answer encoded in the names
-bench/           recorded baselines
+testdata/satlib/ committed instances, expected answer encoded in the names
+corpus/          manifest of the larger corpus fetched by scripts/fetch-corpus.sh
+bench/           recorded results
 ```

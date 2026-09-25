@@ -1,8 +1,13 @@
 BIN       := bin
 CORPUS    := testdata/satlib
 BASELINE  := bench/baseline.csv
+# The large corpus lives outside the repository; see scripts/fetch-corpus.sh.
+EXTCORPUS := $(if $(GOMISAT_CORPUS),$(GOMISAT_CORPUS),$(HOME)/.cache/gomisat/corpus)
+TIMEOUT   := 10
+EXTBASE   := bench/corpus-t$(TIMEOUT)-lbd.csv
 
-.PHONY: all build test test-full check fmt vet bench bench-suite baseline clean
+.PHONY: all build test test-full check fmt vet bench bench-suite baseline \
+	corpus corpus-sweep corpus-compare clean
 
 all: build
 
@@ -43,6 +48,21 @@ bench-suite: build
 # justifies it.
 baseline: build
 	$(BIN)/gomibench -check -timeout 60 -o $(BASELINE) $(CORPUS)
+
+# Download the benchmark corpus described by corpus/manifest.tsv. It is the
+# corpus the committed testdata cannot replace: harder instances, several
+# families, and a difficulty gradient.
+corpus:
+	scripts/fetch-corpus.sh
+
+# Record the corpus results, verifying every decided answer on the way.
+corpus-sweep: build
+	$(BIN)/gomibench -check -timeout $(TIMEOUT) -o $(EXTBASE) $(EXTCORPUS)
+
+# Compare against the recorded corpus results. This is the measurement that
+# decides whether a change to the search is an improvement.
+corpus-compare: build
+	$(BIN)/gomibench -check -timeout $(TIMEOUT) -baseline $(EXTBASE) -o /dev/null $(EXTCORPUS)
 
 clean:
 	rm -fR pprof $(BIN)

@@ -23,6 +23,11 @@ type Clause struct {
 	activity float64
 	abs      uint64
 	lits     []Lit
+
+	// Learnt clauses only. See lbd.go.
+	lbd     int        // number of distinct decision levels, when it was last measured
+	tier    clauseTier // which tier the clause is managed in
+	touched uint64     // conflict count when it last took part in conflict analysis
 }
 
 func (c *Clause) String() string {

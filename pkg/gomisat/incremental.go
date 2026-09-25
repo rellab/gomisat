@@ -111,15 +111,15 @@ func (s *Solver) SetPropBudget(n int64) {
 }
 
 // Interrupt asks a running solve to stop and return LUndef. It is safe to call
-// from another goroutine only in the sense that the flag is written once and
-// polled; it is meant for a wall-clock timeout in a benchmark driver.
+// from another goroutine, which is how a wall-clock timeout is implemented; the
+// flag is polled at every decision, so a solve stops promptly.
 func (s *Solver) Interrupt() {
-	s.asynchInterrupt = true
+	s.asynchInterrupt.Store(true)
 }
 
 // ClearInterrupt clears a pending interrupt so the solver can be used again.
 func (s *Solver) ClearInterrupt() {
-	s.asynchInterrupt = false
+	s.asynchInterrupt.Store(false)
 }
 
 // analyzeFinal computes the subset of the assumptions that explains why the

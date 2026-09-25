@@ -16,6 +16,7 @@ import (
 
 func main() {
 	model := flag.Bool("model", false, "print the satisfying assignment as a DIMACS v-line")
+	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
 	timeout := flag.Float64("timeout", 0, "wall clock limit in seconds (0 = no limit)")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -29,7 +30,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gomisat:", err)
 		os.Exit(1)
 	}
-	clauses, err := gomisat.ParseDimacs(buf)
+	cnf, err := gomisat.ParseDimacsCNF(buf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gomisat:", err)
 		os.Exit(1)
@@ -37,9 +38,8 @@ func main() {
 
 	s := gomisat.NewSolver()
 	options := gomisat.DefaultSolverOptions()
-	for _, c := range clauses {
-		s.AddClauseFromCode(c, options)
-	}
+	options.UseLBD = *noLBD == false
+	s.AddCNF(cnf, options)
 	if *timeout > 0 {
 		timer := time.AfterFunc(time.Duration(*timeout*float64(time.Second)), s.Interrupt)
 		defer timer.Stop()
@@ -49,9 +49,10 @@ func main() {
 	status := s.Solve(options)
 	elapsed := time.Since(start)
 
-	fmt.Printf("c vars %d clauses %d\n", s.NumVars(), len(clauses))
+	fmt.Printf("c vars %d clauses %d\n", s.NumVars(), len(cnf.Clauses))
 	fmt.Printf("c conflicts %d propagations %d decisions %d restarts %d\n",
 		s.Conflicts, s.Propagations, s.Decisions, s.Starts)
+	fmt.Printf("c learnts %d\n", s.NumLearnts())
 	fmt.Printf("c time %.6f s\n", elapsed.Seconds())
 
 	switch status {

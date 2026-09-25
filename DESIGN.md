@@ -72,17 +72,100 @@ and gomisat's own fresh-WMC mode.
 | phase | content | status |
 | --- | --- | --- |
 | 0 | public API for repeated queries, regression and benchmark infrastructure | done |
-| 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, restart policy, vivification and basic inprocessing | next |
+| 1 | minimum-modern CDCL: LBD + tiered learnt-clause management (**done**, measured below), restart policy, vivification and basic inprocessing | in progress |
 | 2 | component decomposition + component cache | |
 | 3 | weighted model counting | |
 | 4 | repeated-query API + persistent cache across calls | |
 | 5 | **reliability-aware selective cache reuse** — the research contribution | |
 | 6 | evaluation against BDD-based counting, d4, GANAK and fresh WMC | |
 
-Phase 1 stops deliberately. Chronological backtracking, a clause arena
-allocator, proof logging and bounded variable elimination are all worth having,
-but none of them is on the path to phase 5; they get picked up only when a
-measurement says they block progress.
+Phase 1 stops deliberately. Chronological backtracking, proof logging and
+bounded variable elimination are all worth having, but none of them is on the
+path to phase 5; they get picked up only when a measurement says they block
+progress. The clause arena allocator was on that list until the LBD measurement
+below promoted it: it is now the largest single lever available.
+
+## Corpus
+
+Two tiers, for two different jobs.
+
+**Committed** (`testdata/satlib`, 2185 instances): small, fast, hermetic. This is
+what the regression suite uses, and what a clone gets without downloading
+anything. It answers "is the solver still correct".
+
+**External** (`corpus/manifest.tsv` + `scripts/fetch-corpus.sh`, 1234 instances,
+about 99 MB extracted): random 3-SAT at the phase transition from 150 to 250
+variables, graph colouring from 150 to 200 vertices, and the crafted and
+industrial families (pigeonhole, parity, bridge fault, PRET, Hanoi, inductive
+inference, all-interval series, planning, bounded model checking, Beijing). It
+answers "did this change to the search help". The instances are not committed:
+they are reproducible from the pinned checksums in the manifest, and they are
+fetched into `$GOMISAT_CORPUS` (default `~/.cache/gomisat/corpus`), outside the
+repository, which lives in a synced folder.
+
+The expected answer is carried by the local directory name (`sat-` / `unsat-`
+prefix), which is the same rule the regression suite uses for the committed data,
+so `gomibench -check` validates the corpus and the solver at once. An instance
+that is not decided within the limits is reported as UNKNOWN and is not counted
+as a wrong answer.
+
+## Phase 1: measured effect of LBD and tiered clause management
+
+Measured on the external corpus, 1234 instances, 10 s per instance, both arms
+from the same binary (`gomibench -no-lbd` selects the activity-only policy, which
+is what MiniSat does). Recorded in `bench/corpus-t10-activity.csv` and
+`bench/corpus-t10-lbd.csv`.
+
+|  | activity only | LBD + tiers |
+| --- | --- | --- |
+| instances decided | 1210 | **1221** |
+| total time | 1071 s | **877 s** |
+| conflicts, instances decided by both | 67.7 M | **25.6 M** |
+
+Twelve instances became solvable, all in `uuf250-1065`; one was lost, `hole9`.
+Per-instance medians over the 886 instances that both arms decided in at least
+5 ms:
+
+| family | n | median time | median conflicts | µs/conflict, activity | µs/conflict, LBD |
+| --- | --- | --- | --- | --- | --- |
+| `uuf250-1065` | 88 | **0.634** | **0.281** | 12.9 | 29.9 |
+| `uuf225-960` | 100 | **0.815** | **0.394** | 11.2 | 24.3 |
+| `uuf200-860` | 99 | **0.932** | **0.528** | 9.5 | 17.3 |
+| `uuf150-645` | 100 | **0.941** | 0.774 | 7.0 | 9.0 |
+| `uf200-860` | 96 | **0.901** | 0.603 | 9.3 | 14.4 |
+| `uf250-1065` | 98 | 1.147 | 0.617 | 12.4 | 26.6 |
+| `bmc`, `beijing`, `flat*`, `hanoi`, `bf` | | ~1.00 | **1.000** | | |
+| `pigeon-hole` | 3 | 2.547 | 1.260 | 5.8 | 11.6 |
+| all | 886 | 0.947 | 0.610 | 12.2 | 25.9 |
+
+Three things to take from this.
+
+**It works, and it works on the unsatisfiable side.** UNSAT median time 0.832
+(234 instances faster, 58 slower); SAT median 1.005 (169 faster, 174 slower, with
+large variance in both directions, which is what satisfiable random instances do).
+The mechanism is visible directly: on `uuf250-01` the activity-only policy retains
+**133** learnt clauses and needs 600 680 conflicts, while the tiered policy retains
+4724 and needs 129 640. MiniSat's reduction was simply throwing away too much.
+
+**The win is capped by a 2.1x cost per conflict.** Conflicts fall by a median
+factor of 0.61 but wall time only to 0.95, because the retained database is an
+order of magnitude larger. Propagations per conflict are unchanged (about 44 on
+`uuf250-01` in both arms), so the extra time is watch-list traversal, not extra
+propagation: a locality and representation problem. **This is the measurement that
+promotes the clause arena allocator from "nice to have" to the next thing to do**,
+ahead of further heuristics. A bounded reduction schedule driven by the conflict
+count, as Glucose uses, belongs with it; the current trigger is a database-size
+comparison inherited from MiniSat.
+
+**On easy structured families LBD does not engage at all.** `bmc`, `beijing`,
+`flat*`, `hanoi`, `blocksworld` and `bf` show a conflict ratio of exactly 1.000:
+they finish before any reduction is triggered, so the two arms run the same search.
+Any claim about structured instances needs harder ones than SATLIB provides.
+
+`pigeon-hole` is a genuine regression (median time 2.547, conflicts 1.260, and
+`hole9` is no longer solved within 10 s). Pigeonhole is exponential for resolution
+whatever the clause management, and low-LBD clauses are not the useful ones there.
+It is recorded rather than fixed.
 
 ## Invariants
 
@@ -102,10 +185,10 @@ Invariant 4 is the one the later phases will keep breaking, and invariant 3 will
 become the oracle for counting as well: exhaustive enumeration gives the exact
 weighted count on small instances.
 
-## Defects found while building phase 0
+## Defects found so far
 
-All four were dormant in the sense that the ordinary DIMACS-in, answer-out path
-mostly hid them.
+All of these were dormant in the sense that the ordinary DIMACS-in, answer-out
+path on the committed test data hid them.
 
 - `VarHeap.RemoveMin` reset the index of the removed variable to `0` instead of
   `-1` when the heap held a single element, so `InHeap` reported it as present
@@ -130,16 +213,31 @@ mostly hid them.
   literal instead of checking the remaining ones, and `findLit` reported a
   negated occurrence as an exact one. Unused until subsumption and vivification
   arrive in phase 1.
+- The DIMACS parser read one clause per line. DIMACS is a stream of integers
+  terminated by 0, and a clause may span lines; the SATLIB inductive inference
+  family does exactly that (`ii8a1.cnf` declares 186 clauses over 384 lines).
+  Every such instance was silently turned into a more constrained formula and
+  reported UNSAT, and the whole family is satisfiable. Found by widening the
+  corpus, which is the argument for having done so before touching the search.
+  `ParseDimacsCNF` now tokenises, honours the SATLIB `%` terminator, accepts
+  comments anywhere and an unterminated final clause, and reports the declared
+  variable count so that `AddCNF` can create variables no clause mentions.
 
 ## Known gaps
 
-- **The corpus is too easy to measure search changes.** All 2185 instances are
-  solved in under 0.8 s in total, the slowest taking 27 ms. It validates
-  correctness, not performance; phase 1 needs harder instances (SAT competition
-  benchmarks) before LBD or restart changes can be judged.
-- No clause arena allocator: clauses are individually allocated and the watcher
-  lists keep pointers. Not a problem at the current scale, but it is the reason
-  GC pressure will show up once learnt clauses reach the hundreds of thousands.
+- **No clause arena allocator.** Clauses are allocated individually and the
+  watcher lists hold pointers. The LBD measurement above puts a number on what
+  that costs: 2.1x the wall time per conflict once the database is allowed to
+  grow. This is the next thing to do.
+- **The reduction schedule is MiniSat's**, triggered by a comparison against a
+  growing size budget rather than by a conflict counter, so the database size is
+  not actually bounded. Glucose's schedule belongs with the arena work.
+- **The committed corpus cannot measure search changes**, only correctness: all
+  2185 instances together take under 0.8 s. The external corpus covers this, but
+  it too runs out of difficulty on structured families, where the conflict ratio
+  between the two clause policies is exactly 1.000 because no reduction is ever
+  triggered. Judging inprocessing will need harder industrial instances than
+  SATLIB has.
 - No proof logging (DRAT/LRAT), no bounded variable elimination, no
   `SimpSolver` equivalent.
 - Clause addition after the first solve is untested.

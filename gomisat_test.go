@@ -1,7 +1,7 @@
 package test
 
 import (
-	"com.github/rellab/gomisat/pkg/gomisat"
+	"github.com/rellab/gomisat/pkg/gomisat"
 	"fmt"
 	"io"
 	"log"

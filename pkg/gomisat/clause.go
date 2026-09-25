@@ -66,30 +66,37 @@ func (c *Clause) Subsumes(d *Clause) (Lit, error) {
 		d.header.hasExtra == false {
 		return 0, ErrAssertError
 	}
-	if len(c.lits) < len(d.lits) || c.abs & ^d.abs != 0 {
-		return 0, ErrLitError
+	// c can only subsume d if c is the shorter clause.
+	if len(d.lits) < len(c.lits) || c.abs & ^d.abs != 0 {
+		return LitUndef, ErrLitError
 	}
+	ret := LitUndef
 	for _, x := range c.lits {
-		p, n := findLit(x, d.lits)
+		pos, neg := findLit(x, d.lits)
 		switch {
-		case p == false && n == true:
-			return x, nil
-		case p == false && n == false:
-			return 0, ErrLitError
+		case pos:
+			// x occurs in d as is, nothing to record.
+		case neg && ret == LitUndef:
+			// x occurs negated: c subsumes d only after resolving on x
+			// (self-subsuming resolution). At most one such literal is
+			// allowed; a second one means c does not subsume d.
+			ret = x
 		default:
+			return LitUndef, ErrLitError
 		}
 	}
-	return LitUndef, nil
+	return ret, nil
 }
 
-// The function is called in the Subsumes only
-func findLit(x Lit, ps []Lit) (bool, bool) {
+// findLit reports whether x occurs in ps as is (pos) and whether it occurs
+// negated (neg). It is called from Subsumes only.
+func findLit(x Lit, ps []Lit) (pos bool, neg bool) {
 	for _, y := range ps {
 		if x == y {
-			return true, false
+			pos = true
 		} else if x == y.Not() {
-			return true, false
+			neg = true
 		}
 	}
-	return false, false
+	return pos, neg
 }

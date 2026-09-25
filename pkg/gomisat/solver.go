@@ -580,7 +580,32 @@ func (s *Solver) rebuildOrderHeap() {
 	}
 }
 
+// Solve searches for a model of the current clause set without assumptions.
+// Assumptions left over from a previous call are discarded.
 func (s *Solver) Solve(options *SolverOptions) LBool {
+	return s.SolveWithAssumptions(nil, options)
+}
+
+// SolveWithAssumptions searches for a model in which every literal of
+// assumptions is true. The assumptions hold for this call only; they are
+// replaced on every call, so a solver can be reused for a sequence of queries.
+//
+// On LTrue the assignment is available through Model / ModelValue.
+// On LFalse, if assumptions were given, UnsatCore reports the subset of them
+// that is already sufficient for unsatisfiability. An empty core means the
+// clause set itself is unsatisfiable and the solver is permanently UNSAT.
+func (s *Solver) SolveWithAssumptions(assumptions []Lit, options *SolverOptions) LBool {
+	s.assumptions = append(s.assumptions[:0], assumptions...)
+	// An assumption may name a variable that no clause mentions, which is a
+	// legitimate query: the variable simply is free. Create it rather than
+	// indexing past the end of the assignment arrays.
+	for _, p := range s.assumptions {
+		s.addVar(int64(p.Var()), options)
+	}
+	return s.solve(options)
+}
+
+func (s *Solver) solve(options *SolverOptions) LBool {
 	s.model = make(map[Var]LBool)
 	s.conflict = make(map[Lit]struct{})
 
@@ -629,6 +654,10 @@ func (s *Solver) Solve(options *SolverOptions) LBool {
 	} else if status == LFalse && len(s.conflict) == 0 {
 		s.ok = false
 	}
+	// Return to the root level so that the solver can be reused by the next
+	// call. Without this the trail is left inside a decision level and any
+	// subsequent solve starts from a corrupted state.
+	s.cancelUntil(0, options)
 	return status
 }
 
@@ -714,6 +743,11 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 			}
 
 			next := LitUndef
+			// NOTE: this loop must be labelled. In Go a bare 'break' inside a
+			// switch leaves the switch only, not the enclosing for, so the
+			// unassigned-assumption case would spin forever re-reading the same
+			// literal. The C++ original relies on 'break' leaving the while.
+		placeAssumptions:
 			for s.decisionLevel() < len(s.assumptions) {
 				if debug {
 					log.Println("search: Perform user provided assumption")
@@ -724,11 +758,13 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 					// Dummy decision level
 					s.newDecisionLevel()
 				case LFalse:
-					//s.analyzeFinal(p.Not(), conflict)
+					// An assumption is falsified: record the subset of the
+					// assumptions responsible for it, i.e. the UNSAT core.
+					s.conflict = s.analyzeFinal(p.Not())
 					return LFalse
 				default:
 					next = p
-					break
+					break placeAssumptions
 				}
 			}
 
@@ -753,7 +789,6 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 			s.UncheckedEnqueue(next, nil)
 		}
 	}
-	return LUndef
 }
 
 func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
@@ -762,7 +797,9 @@ func (s *Solver) pickBranchLit(options *SolverOptions) Lit {
 	// Random decision
 	if drand(&options.RandomSeed) < options.RandomVarFreq && s.orderHeap.IsEmpty() == false {
 		next = s.orderHeap.heap[irand(&options.RandomSeed, len(s.orderHeap.heap))]
-		if (s.assigns[next] != LTrue || s.assigns[next] != LFalse) && s.decision[next] == true {
+		// The condition has to be 'unassigned and eligible'; the disjunction it
+		// replaces was true for every value of next.
+		if s.assigns[next] == LUndef && s.decision[next] == true {
 			s.RndDecisions++
 		}
 	}
@@ -1121,6 +1158,4 @@ func (s *Solver) litRedundant(p Lit, seen map[Var]byte) bool {
 	nextLoop:
 		i++
 	}
-
-	return true
 }

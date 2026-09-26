@@ -74,7 +74,7 @@ and gomisat's own fresh-WMC mode.
 | 0 | public API for repeated queries, regression and benchmark infrastructure | done |
 | 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, clause arena, conflict-driven reduction schedule, dynamic restarts (**done**, all measured below); vivification and basic inprocessing still open | in progress |
 | 2 | component decomposition + component cache, and the reliability model generator | done, measured below |
-| 3 | weighted model counting | |
+| 3 | weighted model counting | done, below |
 | 4 | repeated-query API + persistent cache across calls | |
 | 5 | **reliability-aware selective cache reuse** — the research contribution | |
 | 6 | evaluation against BDD-based counting, d4, GANAK and fresh WMC | |
@@ -418,6 +418,59 @@ This is the single largest effect measured anywhere in this project, and it is
 worth being clear about why: it is not a better search, it is the same search told
 which variables matter. That is the whole argument for the decomposition-aware
 direction of phase 5.
+
+## Phase 3: weights, and what the weighted count is
+
+Every literal carries a weight, the weight of an assignment is the product of its
+literals' weights, and the weighted count is the sum over the models. With the
+"works" literal of a component weighted by its probability and the complement by
+one minus it, **the weighted count of the structure function is the reliability of
+the system**. That identity is what the whole project is aimed at, and phase 3 is
+where it starts holding.
+
+`weighted.go` is a second implementation of the recursion in `count.go` rather than
+a generalisation of it. That is deliberate: with unit weights the two must agree
+exactly, and no shared implementation could provide that check.
+
+The accumulator is a `big.Float`, not a `float64`. The probability of a long series
+of components leaves the range of a double, and a reliability that silently
+underflows to zero is worse than no answer; `TestWeightedSurvivesUnderflow` counts
+0.5^1200 and requires the answer to be exact while a `float64` conversion of it is
+zero.
+
+Validated against: weighted enumeration on small random instances in three
+configurations; the unweighted counter with unit weights; and the closed forms of
+reliability theory -- a series system is the product, a parallel system the
+complement of the product of complements, a k-out-of-n system of identical
+components the binomial sum, and a multi-state k-out-of-n at a threshold the same
+binomial in P(state >= threshold). A 30-out-of-50 system of components with
+reliability 0.9 comes out at 0.999999996293 in 1.2 s.
+
+### The encoding has to match the weighting, so the model owns the weights
+
+A multi-state component can be encoded in order -- a variable per level, meaning
+"in state j or better", with chain clauses -- or one-hot, with an indicator per
+state and an exactly-one constraint. Both are one-to-one with the states, so both
+count correctly. Only one of them can be weighted with independent literal
+weights.
+
+The order encoding cannot: a component in state s leaves every level above s
+false, and those false literals would drag their own weights into the product. The
+one-hot encoding can, provided the **false** indicators carry weight one rather
+than 1-q: exactly one indicator per component is true in a model, so the product
+over the component is the probability of the state it is in.
+
+Getting this wrong produces a number that looks like a reliability. It was in fact
+got wrong here first, with 1-q on the false indicators, which turned an answer of
+0.99999 into 0.0023 -- and 0.0023 is exactly the eighth power of
+`sum_s q_s prod_{s' != s} (1 - q_{s'})`, which is what that mistake computes. So
+the weights are not something a caller assembles and hands in. They are recorded on
+the model by `SetProbability` for a binary event and `SetStateProbabilities` for a
+multi-state component, each of which knows the rule its own encoding needs.
+
+The order encoding stays, because a threshold is a single literal in it and that is
+what makes a threshold change a small, systematic difference between two queries --
+which is the phase 5 question. Weighted studies use the one-hot form.
 
 ## Invariants
 

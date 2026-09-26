@@ -28,7 +28,9 @@ literal block distance, the database is reduced on a conflict-driven schedule, a
 restarts are driven by a fast and a slow average of the clause quality with
 Glucose's blocking rule. Every one of those choices is a measurement recorded in
 DESIGN.md, and the settings they beat are still switchable. Counting is not
-implemented; the counter is unweighted so far.
+implemented, and the counter is weighted: with a component's probability on its
+"works" literal, the weighted count of the structure function is the reliability of
+the system.
 
 Model counting decomposes the residual formula into independent components and
 memoises them, and `pkg/reliability` builds the systems it is meant to count --
@@ -128,6 +130,8 @@ pkg/gomisat/     the solver and the model counter
   heap.go          activity-ordered variable heap
   dimacs.go        DIMACS parsing
   count.go         model counting: component decomposition and caching
+  weighted.go      weighted model counting, which is where reliability comes out
+  branch.go        the branching order, from an elimination order of the primal graph
 testdata/satlib/ committed instances, expected answer encoded in the names
 corpus/          manifest of the larger corpus, and the known answer of every instance
 bench/           recorded results

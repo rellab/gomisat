@@ -35,6 +35,9 @@ type CountOptions struct {
 	UseDecomposition bool
 	// Branching selects the variable order; see branch.go.
 	Branching string
+	// Precision is the mantissa width of the weighted accumulator, in bits.
+	// Zero means 256, which is far more than a reliability figure needs.
+	Precision uint
 }
 
 func DefaultCountOptions() *CountOptions {

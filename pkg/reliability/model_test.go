@@ -1,6 +1,8 @@
 package reliability
 
 import (
+	"fmt"
+	"math"
 	"math/big"
 	"math/rand"
 	"testing"
@@ -204,6 +206,164 @@ func TestEncodingPreservesCount(t *testing.T) {
 			_, numVars, numEvents := m.CNF()
 			t.Fatalf("case %d (%d events, %d variables, %d auxiliaries): count = %v, want %v",
 				i, numEvents, numVars, numVars-numEvents, got, want)
+		}
+	}
+}
+
+// ---- weighted counting against the closed forms of reliability theory ----
+
+func approx(t *testing.T, got *big.Float, want float64, what string) {
+	t.Helper()
+	g, _ := got.Float64()
+	if want == 0 {
+		if g > 1e-12 {
+			t.Errorf("%s = %g, want 0", what, g)
+		}
+		return
+	}
+	if rel := (g - want) / want; rel > 1e-9 || rel < -1e-9 {
+		t.Errorf("%s = %.15g, want %.15g (relative error %g)", what, g, want, rel)
+	}
+}
+
+// TestSeriesReliability: a series system works only if every component does, so
+// its reliability is the product.
+func TestSeriesReliability(t *testing.T) {
+	ps := []float64{0.9, 0.95, 0.99, 0.8, 0.7}
+	m := New()
+	events := m.Events("x", len(ps))
+	m.Assert(m.And(events...))
+	want := 1.0
+	for i, p := range ps {
+		m.SetProbability(events[i], p)
+		want *= p
+	}
+	approx(t, m.Reliability(), want, "series reliability")
+}
+
+// TestParallelReliability: a parallel system fails only if every component does.
+func TestParallelReliability(t *testing.T) {
+	ps := []float64{0.5, 0.6, 0.7, 0.2}
+	m := New()
+	events := m.Events("x", len(ps))
+	m.Assert(m.Or(events...))
+	fail := 1.0
+	for i, p := range ps {
+		m.SetProbability(events[i], p)
+		fail *= 1 - p
+	}
+	approx(t, m.Reliability(), 1-fail, "parallel reliability")
+}
+
+// TestKOutOfNReliability checks the binomial formula for identical components,
+// which is the standard textbook case and exercises the whole gate encoding under
+// weights.
+func TestKOutOfNReliability(t *testing.T) {
+	const p = 0.85
+	for n := 1; n <= 10; n++ {
+		for k := 1; k <= n; k++ {
+			m := New()
+			events := m.Events("x", n)
+			m.Assert(m.AtLeast(k, events...))
+			for _, e := range events {
+				m.SetProbability(e, p)
+			}
+			want := 0.0
+			for i := k; i <= n; i++ {
+				c, _ := new(big.Float).SetInt(new(big.Int).Binomial(int64(n), int64(i))).Float64()
+				want += c * math.Pow(p, float64(i)) * math.Pow(1-p, float64(n-i))
+			}
+			approx(t, m.Reliability(), want, fmt.Sprintf("%d-out-of-%d reliability", k, n))
+		}
+	}
+}
+
+// TestRandomTreeReliability is the general check: for a random structure function
+// with random component probabilities, the weighted count must equal the sum of
+// the probabilities of the event assignments that satisfy it.
+func TestRandomTreeReliability(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260928))
+	for i := 0; i < 80; i++ {
+		events := 3 + rng.Intn(6)
+		top := randomTree(rng, events, 1+rng.Intn(3))
+
+		m := New()
+		nodes := m.Events("x", events)
+		m.Assert(top.encode(m, nodes))
+
+		ps := make([]float64, events)
+		for v := 0; v < events; v++ {
+			ps[v] = 0.05 + 0.9*rng.Float64()
+			m.SetProbability(nodes[v], ps[v])
+		}
+
+		want := 0.0
+		assignment := make([]bool, events)
+		for mask := 0; mask < 1<<events; mask++ {
+			w := 1.0
+			for v := 0; v < events; v++ {
+				assignment[v] = mask&(1<<v) != 0
+				if assignment[v] {
+					w *= ps[v]
+				} else {
+					w *= 1 - ps[v]
+				}
+			}
+			if top.eval(assignment) {
+				want += w
+			}
+		}
+		approx(t, m.Reliability(), want, fmt.Sprintf("case %d", i))
+	}
+}
+
+// TestMultiStateOneHotCounts checks that the one-hot encoding is one-to-one with
+// the states, so that counting it counts states.
+func TestMultiStateOneHotCounts(t *testing.T) {
+	m := New()
+	m.MultiStateOneHot("a", 3)
+	m.MultiStateOneHot("b", 5)
+	clauses, numVars, _ := m.CNF()
+	s := gomisat.NewSolver()
+	options := gomisat.DefaultSolverOptions()
+	s.AddCNF(&gomisat.CNF{NumVars: numVars, NumClauses: len(clauses), Clauses: clauses}, options)
+	got, _ := s.CountModels(options, gomisat.DefaultCountOptions())
+	if want := big.NewInt(15); got.Cmp(want) != 0 {
+		t.Errorf("count = %v, want %v", got, want)
+	}
+}
+
+// TestMultiStateReliability is the case the project exists for: components with
+// several states, a threshold that says which states count as working, and a
+// k-out-of-n system over those. With identical components the answer is the
+// binomial formula on p = P(state >= threshold).
+func TestMultiStateReliability(t *testing.T) {
+	// Four states, worst to best.
+	q := []float64{0.05, 0.15, 0.3, 0.5}
+	const n = 8
+
+	for threshold := 1; threshold < len(q); threshold++ {
+		p := 0.0
+		for s := threshold; s < len(q); s++ {
+			p += q[s]
+		}
+		for _, k := range []int{1, n / 2, n} {
+			m := New()
+			working := make([]Node, 0, n)
+			for i := 0; i < n; i++ {
+				indicators := m.MultiStateOneHot(fmt.Sprintf("c%d", i), len(q))
+				m.SetStateProbabilities(indicators, q)
+				working = append(working, m.AtLeastState(indicators, threshold))
+			}
+			m.Assert(m.AtLeast(k, working...))
+
+			want := 0.0
+			for i := k; i <= n; i++ {
+				c, _ := new(big.Float).SetInt(new(big.Int).Binomial(int64(n), int64(i))).Float64()
+				want += c * math.Pow(p, float64(i)) * math.Pow(1-p, float64(n-i))
+			}
+			approx(t, m.Reliability(), want,
+				fmt.Sprintf("%d-out-of-%d at threshold %d (p=%.2f)", k, n, threshold, p))
 		}
 	}
 }

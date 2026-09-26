@@ -15,7 +15,12 @@
 // TestEncodingPreservesCount checks it against a direct evaluation.
 package reliability
 
-import "fmt"
+import (
+	"fmt"
+	"math/big"
+
+	"github.com/rellab/gomisat/pkg/gomisat"
+)
 
 // Node is a literal: a variable of the encoding, possibly negated.
 type Node int64
@@ -31,11 +36,19 @@ type Model struct {
 	events   int      // how many of them there are
 	clauses  [][]int64
 	trueNode Node
+	// weights records the literal weights of the variables that have them. The
+	// model owns them because the right rule depends on the encoding, and pairing
+	// the wrong rule with an encoding is the classic way to get a plausible but
+	// wrong reliability: see SetProbability and SetStateProbabilities.
+	weights map[Node][2]float64
 }
 
 // New returns an empty model.
 func New() *Model {
-	return &Model{names: make([]string, 0, 32)}
+	return &Model{
+		names:   make([]string, 0, 32),
+		weights: make(map[Node][2]float64),
+	}
 }
 
 func (m *Model) newVar(name string, event bool) Node {
@@ -83,6 +96,54 @@ func (m *Model) MultiState(name string, states int) []Node {
 		m.clause(-int64(levels[j]), int64(levels[j-1]))
 	}
 	return levels
+}
+
+// MultiStateOneHot adds a component with the given number of states, encoded with
+// one indicator per state and an exactly-one constraint. The returned node s is
+// "the component is in state s".
+//
+// This is the encoding to use with weights. The order encoding of MultiState is
+// natural for thresholds and is one-to-one with the states, so it counts
+// correctly, but it cannot carry a state distribution on independent literal
+// weights: a component in state s leaves the levels above s false, and their
+// weights would multiply into the answer. With one indicator per state, exactly
+// one literal of the component is true in any model, so putting the probability of
+// state s on indicator s and leaving everything else at weight one makes the
+// product come out as that probability.
+func (m *Model) MultiStateOneHot(name string, states int) []Node {
+	if states < 2 {
+		panic("reliability: a component needs at least two states")
+	}
+	indicators := make([]Node, 0, states)
+	for s := 0; s < states; s++ {
+		indicators = append(indicators, m.Event(fmt.Sprintf("%s=%d", name, s)))
+	}
+	atLeastOne := make([]int64, 0, states)
+	for _, in := range indicators {
+		atLeastOne = append(atLeastOne, int64(in))
+	}
+	m.clause(atLeastOne...)
+	// At most one, pairwise. Components have few states, so this is cheap; a
+	// ladder encoding would be the alternative for many.
+	for i := 0; i < len(indicators); i++ {
+		for j := i + 1; j < len(indicators); j++ {
+			m.clause(-int64(indicators[i]), -int64(indicators[j]))
+		}
+	}
+	return indicators
+}
+
+// AtLeastState returns a node that is true when the component whose indicators
+// these are is in state threshold or better. Changing the threshold is one of the
+// systematic differences a reliability study walks through.
+func (m *Model) AtLeastState(indicators []Node, threshold int) Node {
+	if threshold <= 0 {
+		return m.True()
+	}
+	if threshold >= len(indicators) {
+		return indicators[len(indicators)-1]
+	}
+	return m.Or(indicators[threshold:]...)
 }
 
 func (m *Model) clause(lits ...int64) {
@@ -243,4 +304,63 @@ func (m *Model) EventVars() []int {
 func (m *Model) Names() []string {
 	out := append([]string(nil), m.names...)
 	return out
+}
+
+// SetProbability gives a binary event the probability p of being true. The
+// complement 1-p goes on the false literal, which is right exactly because the
+// event has two outcomes and the encoding uses one variable for them.
+func (m *Model) SetProbability(event Node, p float64) {
+	if event <= 0 {
+		panic("reliability: a probability belongs to a variable, not to a negation")
+	}
+	m.weights[event] = [2]float64{p, 1 - p}
+}
+
+// SetStateProbabilities gives a multi-state component its state distribution. The
+// indicators must be the ones MultiStateOneHot returned, and q[s] is the
+// probability of state s.
+//
+// The weight of a false indicator is one, not 1-q[s]. Exactly one indicator of a
+// component is true in any model, so the product over the component is the
+// probability of the state it is in; charging the false indicators their
+// complements would multiply in the complements of every other state as well. That
+// mistake produces a number that looks like a reliability and is not, which is why
+// this is a method on the model rather than something a caller assembles.
+func (m *Model) SetStateProbabilities(indicators []Node, q []float64) {
+	if len(indicators) != len(q) {
+		panic("reliability: one probability per state is required")
+	}
+	sum := 0.0
+	for _, p := range q {
+		sum += p
+	}
+	if sum < 1-1e-9 || sum > 1+1e-9 {
+		panic(fmt.Sprintf("reliability: the state probabilities sum to %g, not 1", sum))
+	}
+	for s, in := range indicators {
+		m.weights[in] = [2]float64{q[s], 1}
+	}
+}
+
+// Weights builds the literal weights of the model. A variable with no weight
+// recorded keeps weight one on both polarities, so it is counted rather than
+// weighted; mixing the two is useful when a design parameter should be enumerated
+// while the components are weighted.
+func (m *Model) Weights() *gomisat.Weights {
+	w := gomisat.NewWeights(len(m.names))
+	for node, pair := range m.weights {
+		w.Set(gomisat.Var(node-1), big.NewFloat(pair[0]), big.NewFloat(pair[1]))
+	}
+	return w
+}
+
+// Reliability is the weighted count of the model: the probability that the
+// asserted structure function holds.
+func (m *Model) Reliability() *big.Float {
+	clauses, numVars, _ := m.CNF()
+	s := gomisat.NewSolver()
+	options := gomisat.DefaultSolverOptions()
+	s.AddCNF(&gomisat.CNF{NumVars: numVars, NumClauses: len(clauses), Clauses: clauses}, options)
+	value, _ := s.WeightedCount(options, gomisat.DefaultCountOptions(), m.Weights())
+	return value
 }

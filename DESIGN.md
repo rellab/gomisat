@@ -385,9 +385,39 @@ components added -- and a cache hit rate around a third does not change that.
 
 The lever is the branching order, and the literature agrees: sharpSAT-TD's
 contribution is precisely to choose the branching variable from a tree
-decomposition, which is what makes this kind of structure tractable. The current
-heuristic picks the variable occurring in the most residual clauses. That is the
-next thing to measure.
+decomposition, which is what makes this kind of structure tractable.
+
+### The branching order (`branch.go`)
+
+An occurrence count says nothing about separation: on a cardinality constraint
+every variable occurs about equally often. What is wanted is a variable that cuts
+the component in two, and the cheap way to find such variables is an elimination
+order of the primal graph. Eliminating a vertex means removing it and joining its
+remaining neighbours -- the elimination game -- and a min-degree order keeps the
+cliques that creates small. The vertices eliminated **last** are the ones holding
+the graph together, so those are the ones to branch on **first**. It is a poor
+relation of a real tree decomposition, and it costs one pass over the formula.
+
+On k-out-of-n with k = n/2, counting with both decomposition and caching:
+
+| n | occurrence | elimination order | |
+| --- | --- | --- | --- |
+| 14 | 0.025 s, 6 250 decisions | 0.003 s, 278 | 8x |
+| 18 | 0.456 s, 89 748 | 0.007 s, 560 | 65x |
+| 22 | 7.938 s, 1 314 902 | 0.015 s, 942 | 529x |
+| 26 | 159 s, 19 520 618 | 0.104 s, 2 744 | **1531x** |
+| 30 | over 600 s | 0.058 s, 2 146 | |
+
+The occurrence order is exponential in n; the elimination order is not. With it,
+n = 80 is counted in 13.8 s and 105 614 decisions, and the answer,
+658 216 514 173 982 675 583 898, is exactly `(2^80 + C(80,40))/2`. Both orders
+remain in the regression matrix, and `TestBranchingOnCardinality` asserts the gap
+rather than a time so that it means the same thing on any machine.
+
+This is the single largest effect measured anywhere in this project, and it is
+worth being clear about why: it is not a better search, it is the same search told
+which variables matter. That is the whole argument for the decomposition-aware
+direction of phase 5.
 
 ## Invariants
 
@@ -481,9 +511,11 @@ path on the committed test data hid them.
 - **The counter has no weights yet** (phase 3) and **no cache that survives across
   calls** (phase 4). The cache is a `map[string]*big.Int` keyed by a packed byte
   string: correct, and generous with memory. Bounding it belongs with phase 4.
-- **The counter branches on the variable with the most occurrences**, which on
-  cardinality structure is close to the worst possible order. A
-  decomposition-aware order is the first thing to try in phase 3.
+- **The elimination order is min-degree, computed once, on the whole formula.**
+  Min-fill would be better, a real tree decomposition better still, and neither is
+  recomputed as the formula shrinks under the assignment. The current
+  implementation is also O(n^2) per elimination step, which is why it gives up
+  above 20 000 variables.
 - **Vivification and inprocessing are postponed, not dismissed.** They cannot be
   measured on the present corpus: two thirds of it is random 3-SAT, the family
   where they help least, and the structured families are solved in well under a

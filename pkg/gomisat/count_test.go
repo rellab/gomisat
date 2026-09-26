@@ -97,10 +97,12 @@ func TestCountSmallByHand(t *testing.T) {
 // combination of decomposition and caching.
 func TestCountAgainstBruteForce(t *testing.T) {
 	configs := map[string]*CountOptions{
-		"plain":           {UseCache: false, UseDecomposition: false},
-		"decompose":       {UseCache: false, UseDecomposition: true},
-		"cache":           {UseCache: true, UseDecomposition: false},
-		"decompose+cache": {UseCache: true, UseDecomposition: true},
+		"plain":                 {},
+		"decompose":             {UseDecomposition: true},
+		"cache":                 {UseCache: true},
+		"decompose+cache":       {UseCache: true, UseDecomposition: true},
+		"order":                 {Branching: BranchEliminationOrder},
+		"order+decompose+cache": {UseCache: true, UseDecomposition: true, Branching: BranchEliminationOrder},
 	}
 	for name, copt := range configs {
 		t.Run(name, func(t *testing.T) {
@@ -133,6 +135,11 @@ func TestCountDecompositionMatchesPlain(t *testing.T) {
 		plain, _ := countWith(t, clauses, nvars, &CountOptions{})
 		dec, _ := countWith(t, clauses, nvars, &CountOptions{UseDecomposition: true})
 		cached, stats := countWith(t, clauses, nvars, DefaultCountOptions())
+		ordered, _ := countWith(t, clauses, nvars, &CountOptions{Branching: BranchEliminationOrder})
+		if ordered.Cmp(plain) != 0 {
+			t.Fatalf("case %d: elimination-order branching says %v, plain search says %v\nclauses=%v",
+				i, ordered, plain, clauses)
+		}
 		if dec.Cmp(plain) != 0 {
 			t.Fatalf("case %d: decomposition says %v, plain search says %v\nclauses=%v", i, dec, plain, clauses)
 		}
@@ -179,4 +186,98 @@ func TestCountIndependentBlocks(t *testing.T) {
 	if stats.Components < blocks {
 		t.Errorf("decomposition found %d components, want at least %d", stats.Components, blocks)
 	}
+}
+
+// TestEliminationOrderIsAPermutation checks the order itself: every variable gets
+// exactly one position, so a score can be compared without further care.
+func TestEliminationOrderIsAPermutation(t *testing.T) {
+	clauses := loadCNF(t, "../../testdata/satlib/sat-uniform-20-91/uf20-01.cnf")
+	s, options := solverFor(clauses)
+	scores := s.eliminationScores(s.clauses)
+	if scores == nil {
+		t.Fatal("no scores were produced")
+	}
+	_ = options
+	seen := make(map[int32]bool, len(scores))
+	for v, score := range scores {
+		if score < 0 || int(score) >= len(scores) {
+			t.Fatalf("variable %d has position %d, outside 0..%d", v, score, len(scores)-1)
+		}
+		if seen[score] {
+			t.Fatalf("position %d is used twice", score)
+		}
+		seen[score] = true
+	}
+}
+
+// TestBranchingOnCardinality is the case that motivated the elimination order: a
+// k-out-of-n constraint has no separable structure under an occurrence-based order
+// and the search is exponential, while the elimination order finds the structure.
+// The test asserts the gap rather than a time, so it stays meaningful on any
+// machine.
+func TestBranchingOnCardinality(t *testing.T) {
+	clauses := atLeastCNF(18, 9)
+	occurrence, occStats := countWith(t, clauses, 18, &CountOptions{
+		UseCache: true, UseDecomposition: true, Branching: BranchOccurrence})
+	ordered, ordStats := countWith(t, clauses, 18, &CountOptions{
+		UseCache: true, UseDecomposition: true, Branching: BranchEliminationOrder})
+
+	if occurrence.Cmp(ordered) != 0 {
+		t.Fatalf("the two orders disagree: %v against %v", occurrence, ordered)
+	}
+	// sum of C(18, i) for i from 9 to 18
+	if want := big.NewInt(155382); ordered.Cmp(want) != 0 {
+		t.Errorf("count = %v, want %v", ordered, want)
+	}
+	t.Logf("occurrence %d decisions, elimination order %d decisions",
+		occStats.Decisions, ordStats.Decisions)
+	if ordStats.Decisions*10 > occStats.Decisions {
+		t.Errorf("the elimination order took %d decisions against %d: expected at least a factor of ten",
+			ordStats.Decisions, occStats.Decisions)
+	}
+}
+
+// atLeastCNF encodes "at least k of the first n variables are true" with the same
+// recursive construction pkg/reliability uses, as plain DIMACS codes.
+func atLeastCNF(n, k int) [][]int64 {
+	next := int64(n)
+	var clauses [][]int64
+	newVar := func() int64 { next++; return next }
+	and := func(a, b int64) int64 {
+		g := newVar()
+		clauses = append(clauses, []int64{-g, a}, []int64{-g, b}, []int64{g, -a, -b})
+		return g
+	}
+	or := func(a, b int64) int64 {
+		g := newVar()
+		clauses = append(clauses, []int64{g, -a}, []int64{g, -b}, []int64{-g, a, b})
+		return g
+	}
+	trueVar := int64(0)
+	getTrue := func() int64 {
+		if trueVar == 0 {
+			trueVar = newVar()
+			clauses = append(clauses, []int64{trueVar})
+		}
+		return trueVar
+	}
+	memo := map[[2]int]int64{}
+	var rec func(i, j int) int64
+	rec = func(i, j int) int64 {
+		if j <= 0 {
+			return getTrue()
+		}
+		if n-i < j {
+			return -getTrue()
+		}
+		key := [2]int{i, j}
+		if g, ok := memo[key]; ok {
+			return g
+		}
+		g := or(and(int64(i+1), rec(i+1, j-1)), rec(i+1, j))
+		memo[key] = g
+		return g
+	}
+	clauses = append(clauses, []int64{rec(0, k)})
+	return clauses
 }

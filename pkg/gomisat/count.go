@@ -33,10 +33,12 @@ type CountOptions struct {
 	// UseDecomposition splits the residual formula into components. Off, the
 	// counter is a plain DPLL model counter, which is the other reference point.
 	UseDecomposition bool
+	// Branching selects the variable order; see branch.go.
+	Branching string
 }
 
 func DefaultCountOptions() *CountOptions {
-	return &CountOptions{UseCache: true, UseDecomposition: true}
+	return &CountOptions{UseCache: true, UseDecomposition: true, Branching: BranchEliminationOrder}
 }
 
 // CountStats reports what the search did.
@@ -68,6 +70,7 @@ type counter struct {
 	seenVar   []uint64
 	mark      uint64
 	occ       []int32 // occurrences per variable, for the branching heuristic
+	order     []int32 // elimination order position per variable, or nil
 	covered   []uint64
 	coverMark uint64
 	keyBuf    []byte
@@ -96,6 +99,9 @@ func (s *Solver) CountModels(options *SolverOptions, copt *CountOptions) (*big.I
 	}
 	for v := 0; v < n; v++ {
 		c.allVars[v] = Var(v)
+	}
+	if copt.Branching == BranchEliminationOrder {
+		c.order = s.eliminationScores(s.clauses)
 	}
 	total := c.run()
 	c.stats.CacheSize = len(c.cache)
@@ -332,6 +338,16 @@ func (c *counter) branchVar(comp *component) Var {
 			}
 			c.occ[p.Var()]++
 		}
+	}
+	if c.order != nil {
+		// Latest in the elimination order wins; the occurrence count breaks ties.
+		best, bestOrder, bestCount := comp.vars[0], int32(-1), int32(-1)
+		for _, v := range comp.vars {
+			if c.order[v] > bestOrder || (c.order[v] == bestOrder && c.occ[v] > bestCount) {
+				best, bestOrder, bestCount = v, c.order[v], c.occ[v]
+			}
+		}
+		return best
 	}
 	best, bestCount := comp.vars[0], int32(-1)
 	for _, v := range comp.vars {

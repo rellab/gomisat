@@ -73,7 +73,7 @@ and gomisat's own fresh-WMC mode.
 | --- | --- | --- |
 | 0 | public API for repeated queries, regression and benchmark infrastructure | done |
 | 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, clause arena, conflict-driven reduction schedule, dynamic restarts (**done**, all measured below); vivification and basic inprocessing still open | in progress |
-| 2 | component decomposition + component cache | |
+| 2 | component decomposition + component cache, and the reliability model generator | done, measured below |
 | 3 | weighted model counting | |
 | 4 | repeated-query API + persistent cache across calls | |
 | 5 | **reliability-aware selective cache reuse** — the research contribution | |
@@ -334,6 +334,61 @@ from the first conflicts on, and the solver stops restarting almost completely -
 two restarts over a 9 600-conflict run in one measured case, which cost a factor
 of three on that instance.
 
+## Phase 2: decomposition, caching, and where the models come from
+
+`pkg/gomisat/count.go` counts models by search: branch, propagate, split what is
+left into connected components, count each and multiply. Components are memoised
+on the pair (clauses still unsatisfied, their variables still unassigned), which
+determines the residual formula and therefore the count.
+
+**Clause learning is deliberately not used.** A learnt clause may span two
+components, and then assigning inside one of them propagates into the other, which
+is exactly what a product of independent counts cannot survive. Using learning
+here needs care about which clauses may take part in propagation; this stage is
+about a baseline an oracle can check, so it propagates with the problem clauses
+alone. Revisiting it belongs with phase 3.
+
+Correctness is established three ways, which matters more here than anywhere else
+in the project: a wrong count does not announce itself the way a wrong SAT answer
+does.
+
+1. Against enumeration on small random instances, in all four combinations of
+   decomposition and caching on and off (`TestCountAgainstBruteForce`).
+2. Against CaDiCaL's model enumeration through pysat on twenty real `uf20`
+   instances -- an independent solver, not just an independent loop.
+3. Against closed forms on the generated reliability systems: a k-out-of-n system
+   has a binomial sum of working states and a multi-state system a weighted one.
+   All agree exactly.
+
+**`pkg/reliability` is where the query sequences will come from.** It builds the
+structure function of a coherent system -- events, AND/OR gates, k-out-of-n,
+multi-state components in the order encoding -- and encodes it to CNF. Every gate
+variable is defined in both directions, so each assignment of the events extends to
+exactly one assignment of the auxiliaries and the count is preserved.
+`TestEncodingPreservesCount` checks that on 150 random structure functions against
+direct evaluation, because an encoding that loses this property inflates a weighted
+count silently.
+
+What the counter does well and badly is visible already:
+
+| system | events | result | decisions | time |
+| --- | --- | --- | --- | --- |
+| 30 subsystems of 2-out-of-3, in series | 90 | 2^60 models | 180 | 0.000 s |
+| multi-state, 14 components of 4 states, 7 at threshold 2 | 42 | 162 332 672 | 10 782 | 0.054 s |
+| k-out-of-n, n = 18, k = 9 | 18 | 155 382 | 89 748 | 0.459 s |
+
+The first row is what decomposition is for: thirty independent subsystems, 180
+decisions, a count of 2^60. The third row is the opposite. A cardinality constraint
+has no separable structure under a naive branching order, so the search is
+exponential in the number of components -- about a factor of 4.2 per two
+components added -- and a cache hit rate around a third does not change that.
+
+The lever is the branching order, and the literature agrees: sharpSAT-TD's
+contribution is precisely to choose the branching variable from a tree
+decomposition, which is what makes this kind of structure tractable. The current
+heuristic picks the variable occurring in the most residual clauses. That is the
+next thing to measure.
+
 ## Invariants
 
 Every phase is validated against the properties in
@@ -423,3 +478,16 @@ path on the committed test data hid them.
 - No proof logging (DRAT/LRAT), no bounded variable elimination, no
   `SimpSolver` equivalent.
 - Clause addition after the first solve is untested.
+- **The counter has no weights yet** (phase 3) and **no cache that survives across
+  calls** (phase 4). The cache is a `map[string]*big.Int` keyed by a packed byte
+  string: correct, and generous with memory. Bounding it belongs with phase 4.
+- **The counter branches on the variable with the most occurrences**, which on
+  cardinality structure is close to the worst possible order. A
+  decomposition-aware order is the first thing to try in phase 3.
+- **Vivification and inprocessing are postponed, not dismissed.** They cannot be
+  measured on the present corpus: two thirds of it is random 3-SAT, the family
+  where they help least, and the structured families are solved in well under a
+  second each, so a 10 % change would be invisible. The instances that phase 5
+  generates are structured and redundant, which is where these techniques pay;
+  that is the point at which to come back to them with a corpus that can decide
+  the question.

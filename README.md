@@ -28,7 +28,19 @@ literal block distance, the database is reduced on a conflict-driven schedule, a
 restarts are driven by a fast and a slow average of the clause quality with
 Glucose's blocking rule. Every one of those choices is a measurement recorded in
 DESIGN.md, and the settings they beat are still switchable. Counting is not
-implemented yet; see the phase table.
+implemented; the counter is unweighted so far.
+
+Model counting decomposes the residual formula into independent components and
+memoises them, and `pkg/reliability` builds the systems it is meant to count --
+events, AND/OR gates, k-out-of-n, multi-state components -- in an encoding whose
+auxiliary variables are determined by the events, so the count is preserved.
+
+```console
+$ ./bin/gomisat -count testdata/satlib/sat-uniform-20-91/uf20-01.cnf
+c decisions 32 conflicts 12 components 16
+c cache hits 0 misses 16 entries 16
+s mc 8
+```
 
 ## Usage
 
@@ -107,13 +119,15 @@ later phases fail loudly rather than returning a wrong count.
 ```
 cmd/             single-instance solver
 cmd/gomibench/   corpus driver: CSV of per-instance results, answer checking, baseline comparison
-pkg/gomisat/     the solver
+pkg/reliability/ structure functions of coherent systems, encoded to CNF
+pkg/gomisat/     the solver and the model counter
   solver.go        CDCL search, propagation, conflict analysis
   incremental.go   model / core / assumption accessors, budgets, analyzeFinal
   clause.go        the clause arena: metadata and literals in two flat arrays
   lbd.go           literal block distance, clause tiers, reduction schedule
   heap.go          activity-ordered variable heap
   dimacs.go        DIMACS parsing
+  count.go         model counting: component decomposition and caching
 testdata/satlib/ committed instances, expected answer encoded in the names
 corpus/          manifest of the larger corpus, and the known answer of every instance
 bench/           recorded results

@@ -20,6 +20,9 @@ func main() {
 	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile to this file")
 	restart := flag.String("restart", "", "restart policy: luby, geometric, ema or ema-block")
+	count := flag.Bool("count", false, "count the models instead of looking for one")
+	noDecompose := flag.Bool("no-decompose", false, "count without component decomposition")
+	noCache := flag.Bool("no-cache", false, "count without the component cache")
 	timeout := flag.Float64("timeout", 0, "wall clock limit in seconds (0 = no limit)")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -68,6 +71,28 @@ func main() {
 			pprof.StopCPUProfile()
 			f.Close()
 		}
+	}
+
+	if *count {
+		copt := &gomisat.CountOptions{
+			UseCache:         *noCache == false,
+			UseDecomposition: *noDecompose == false,
+		}
+		start := time.Now()
+		models, stats := s.CountModels(options, copt)
+		elapsed := time.Since(start)
+		stopProfile()
+		fmt.Printf("c vars %d clauses %d\n", s.NumVars(), len(cnf.Clauses))
+		fmt.Printf("c decisions %d conflicts %d components %d\n",
+			stats.Decisions, stats.Conflicts, stats.Components)
+		fmt.Printf("c cache hits %d misses %d entries %d\n",
+			stats.CacheHits, stats.CacheMiss, stats.CacheSize)
+		fmt.Printf("c time %.6f s\n", elapsed.Seconds())
+		fmt.Printf("s mc %s\n", models.String())
+		if models.Sign() == 0 {
+			os.Exit(20)
+		}
+		os.Exit(10)
 	}
 
 	start := time.Now()

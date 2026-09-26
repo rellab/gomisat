@@ -75,7 +75,7 @@ and gomisat's own fresh-WMC mode.
 | 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, clause arena, conflict-driven reduction schedule, dynamic restarts (**done**, all measured below); vivification and basic inprocessing still open | in progress |
 | 2 | component decomposition + component cache, and the reliability model generator | done, measured below |
 | 3 | weighted model counting | done, below |
-| 4 | repeated-query API + persistent cache across calls | |
+| 4 | repeated-query API + persistent cache across calls | done, below |
 | 5 | **reliability-aware selective cache reuse** — the research contribution | |
 | 6 | evaluation against BDD-based counting, d4, GANAK and fresh WMC | |
 
@@ -472,6 +472,53 @@ The order encoding stays, because a threshold is a single literal in it and that
 what makes a threshold change a small, systematic difference between two queries --
 which is the phase 5 question. Weighted studies use the one-hot form.
 
+## Phase 4: the repeated-query API and why the cache survives
+
+A `Study` answers a sequence of weighted counting queries over one formula and
+keeps the component cache between them. The queries are expressed as
+**assumptions**, not as edits to the formula: a design alternative gets a selector
+variable, a conditional reliability fixes the component literal it conditions on, a
+threshold is chosen rather than rewritten.
+
+That choice is what makes the cache reusable, and the argument is the whole of
+phase 4:
+
+> A cache entry says "this set of clauses, with these variables still unassigned,
+> has this weighted count". That statement is true independently of the rest of the
+> formula. A clause outside the component cannot affect it -- a satisfied clause
+> cannot propagate, and an unsatisfied one outside the component shares no
+> unassigned variable with it, so it cannot propagate into it either. So an entry
+> computed during one query stays valid for the next, and reuse happens exactly
+> where two searches meet the same sub-problem.
+
+Two conditions hold it up. Clause references must keep their meaning, which is true
+because counting neither learns nor deletes clauses, so no metadata slot is ever
+recycled. And the weights must not change: a cached value is a weighted count, so
+the time-dependent case, where only the probabilities move, needs `ClearCache` --
+and that case is the one better served by compiling once and re-evaluating, which is
+why it is a baseline here rather than a target.
+
+Measured on the query sequence of an importance analysis: 20 components of 4 states,
+10-out-of-20 at threshold 2, 321 variables, 862 clauses, one query per component per
+state, so 80 of them.
+
+| | time | decisions | cache hits |
+| --- | --- | --- | --- |
+| cache cleared between queries | 0.874 s | 41 096 | 40 786, all within a query |
+| **cache carried over** | **0.589 s** | **9 184** | 9 975 |
+
+Decisions fall to 0.22 of what they were, time only to 0.67. The gap between those
+two numbers is the next thing to fix rather than a disappointment: with the search
+cut by a factor of four and a half, what is left is per-node overhead -- building a
+cache key as a byte string and allocating a `big.Float` at every node. A packed key
+and a cache that does not allocate per lookup are phase 4 engineering that phase 5
+needs anyway.
+
+`TestStudyMatchesFreshCounts` is the reuse invariant, the counterpart of the
+solver's reused-against-fresh test: a query answered with a cache carried over from
+earlier queries must agree with a fresh counter. It compares to within the precision
+rather than bit for bit, for the reason recorded under Known gaps.
+
 ## Invariants
 
 Every phase is validated against the properties in
@@ -561,9 +608,14 @@ path on the committed test data hid them.
 - No proof logging (DRAT/LRAT), no bounded variable elimination, no
   `SimpSolver` equivalent.
 - Clause addition after the first solve is untested.
-- **The counter has no weights yet** (phase 3) and **no cache that survives across
-  calls** (phase 4). The cache is a `map[string]*big.Int` keyed by a packed byte
-  string: correct, and generous with memory. Bounding it belongs with phase 4.
+- **The cache is a `map[string]` keyed by a packed byte string**, holding a
+  `big.Int` or a `big.Float`. It is correct and generous with both memory and
+  allocation, and nothing evicts from it. Now that the cache has cut the search,
+  this overhead is where the remaining time goes.
+- **A weighted count is not reproducible bit for bit** between a cached and an
+  uncached evaluation, because the cache changes the order of the floating-point
+  products; the values agree to about 77 decimal digits at the default precision.
+  Exact rational arithmetic would fix it at a cost.
 - **The elimination order is min-degree, computed once, on the whole formula.**
   Min-fill would be better, a real tree decomposition better still, and neither is
   recomputed as the formula shrinks under the assignment. The current

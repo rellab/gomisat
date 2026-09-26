@@ -88,6 +88,11 @@ type weightedCounter struct {
 // WeightedCount returns the sum over the models of the product of their literal
 // weights. With unit weights it is the model count.
 func (s *Solver) WeightedCount(options *SolverOptions, copt *CountOptions, weights *Weights) (*big.Float, CountStats) {
+	return s.weightedCount(options, copt, weights, nil)
+}
+
+func (s *Solver) weightedCount(options *SolverOptions, copt *CountOptions, weights *Weights,
+	cache map[string]*big.Float) (*big.Float, CountStats) {
 	if copt == nil {
 		copt = DefaultCountOptions()
 	}
@@ -99,12 +104,15 @@ func (s *Solver) WeightedCount(options *SolverOptions, copt *CountOptions, weigh
 	if prec == 0 {
 		prec = 256
 	}
+	if cache == nil {
+		cache = make(map[string]*big.Float)
+	}
 	c := &weightedCounter{
 		s:       s,
 		options: options,
 		copt:    copt,
 		weights: weights,
-		cache:   make(map[string]*big.Float),
+		cache:   cache,
 		uf:      make([]Var, n),
 		seenVar: make([]uint64, n),
 		occ:     make([]int32, n),

@@ -131,6 +131,7 @@ pkg/gomisat/     the solver and the model counter
   dimacs.go        DIMACS parsing
   count.go         model counting: component decomposition and caching
   weighted.go      weighted model counting, which is where reliability comes out
+  study.go         a sequence of queries over one formula, sharing the cache
   branch.go        the branching order, from an elimination order of the primal graph
 testdata/satlib/ committed instances, expected answer encoded in the names
 corpus/          manifest of the larger corpus, and the known answer of every instance

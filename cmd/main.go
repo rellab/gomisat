@@ -19,6 +19,7 @@ func main() {
 	model := flag.Bool("model", false, "print the satisfying assignment as a DIMACS v-line")
 	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile to this file")
+	restart := flag.String("restart", "", "restart policy: luby, geometric, ema or ema-block")
 	timeout := flag.Float64("timeout", 0, "wall clock limit in seconds (0 = no limit)")
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -41,6 +42,9 @@ func main() {
 	s := gomisat.NewSolver()
 	options := gomisat.DefaultSolverOptions()
 	options.UseLBD = *noLBD == false
+	if *restart != "" {
+		options.RestartPolicy = *restart
+	}
 	s.AddCNF(cnf, options)
 	if *timeout > 0 {
 		timer := time.AfterFunc(time.Duration(*timeout*float64(time.Second)), s.Interrupt)
@@ -74,7 +78,7 @@ func main() {
 	fmt.Printf("c vars %d clauses %d\n", s.NumVars(), len(cnf.Clauses))
 	fmt.Printf("c conflicts %d propagations %d decisions %d restarts %d\n",
 		s.Conflicts, s.Propagations, s.Decisions, s.Starts)
-	fmt.Printf("c learnts %d\n", s.NumLearnts())
+	fmt.Printf("c learnts %d blocked %d\n", s.NumLearnts(), s.Blocked)
 	fmt.Printf("c time %.6f s\n", elapsed.Seconds())
 
 	switch status {

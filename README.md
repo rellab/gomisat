@@ -18,15 +18,17 @@ of scope — in particular, competing on pure SAT performance is not a goal.
 The solver decides SAT/UNSAT, reports a model, solves under assumptions and
 reports an UNSAT core, and can be reused across queries. All 2185 SATLIB
 instances in `testdata/satlib` are answered correctly, and **1222 of the 1234
-instances of the larger corpus are decided within 10 s each**, in 728 s in total.
-Of the twelve that are not, eleven are not decided by CaDiCaL in 60 s either.
+instances of the larger corpus are decided within 10 s each**, in 599 s in total.
+The eleven that are not are the ten `par32` instances and `hole10`, none of which
+CaDiCaL decides in 60 s either: every instance of the corpus that an independent
+modern solver decides, this one now decides too.
 
 Clauses live in an arena, are deleted lazily, are selected for deletion by
-literal block distance, and the database is reduced on a conflict-driven schedule.
-Every one of those choices is a measurement recorded in
-[DESIGN.md](DESIGN.md#phase-1-second-pass-the-arena-and-the-reduction-schedule),
-and the settings they beat are still switchable. Counting is not implemented yet;
-see the phase table.
+literal block distance, the database is reduced on a conflict-driven schedule, and
+restarts are driven by a fast and a slow average of the clause quality with
+Glucose's blocking rule. Every one of those choices is a measurement recorded in
+DESIGN.md, and the settings they beat are still switchable. Counting is not
+implemented yet; see the phase table.
 
 ## Usage
 

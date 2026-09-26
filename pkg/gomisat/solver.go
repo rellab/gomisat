@@ -20,7 +20,7 @@ type SolverOptions struct {
 	ClauseDecay                float64
 	RandomVarFreq              float64
 	RandomSeed                 float64
-	LubyRestart                bool
+	RestartPolicy              string  // see restart.go: luby, geometric, ema, ema-block
 	CcminMode                  int     // Controls conflict clause minimization (0=none, 1=basic, 2=deep).
 	PhaseSaving                int     // Controls the level of phase saving (0=none, 1=limited, 2=full).
 	RndPol                     bool    // Use random polarities for branching heuristics.
@@ -51,6 +51,16 @@ type SolverOptions struct {
 	ReduceByConflicts bool
 	ReduceFirst       uint64
 	ReduceInc         uint64
+
+	// Dynamic restarts (restart.go). The averages are over the literal block
+	// distance of the learnt clauses; a restart happens when the fast average
+	// exceeds the slow one by RestartMargin.
+	RestartEMAFast     float64
+	RestartEMASlow     float64
+	RestartMargin      float64
+	RestartMinInterval uint64
+	RestartBlockMargin float64
+	RestartBlockAfter  uint64 // no blocking before this many conflicts
 	// ProtectTier2 keeps the mid tier out of the deletion candidates while it is
 	// still in use. Glucose only protects the core tier and takes half of
 	// everything else, which is what the measurement prefers here.
@@ -68,7 +78,7 @@ func DefaultSolverOptions() *SolverOptions {
 		ClauseDecay:                0.999,
 		RandomVarFreq:              0,
 		RandomSeed:                 91648253,
-		LubyRestart:                true,
+		RestartPolicy:              RestartEMABlock,
 		CcminMode:                  2,
 		PhaseSaving:                2,
 		RndPol:                     false,
@@ -89,6 +99,12 @@ func DefaultSolverOptions() *SolverOptions {
 		ProtectTier2:               false,
 		ReduceFirst:                2000,
 		ReduceInc:                  300,
+		RestartEMAFast:             1.0 / 32.0,
+		RestartEMASlow:             1.0 / 16384.0,
+		RestartMargin:              1.25,
+		RestartMinInterval:         50,
+		RestartBlockMargin:         1.4,
+		RestartBlockAfter:          10000,
 	}
 }
 
@@ -168,6 +184,13 @@ type Solver struct {
 	reduceAt       uint64
 	reduceInterval uint64
 
+	// Restart statistics (restart.go).
+	emaFastLBD  float64
+	emaSlowLBD  float64
+	emaTrail    float64
+	emaReady    bool
+	restartBase uint64 // conflict count when the current search segment started
+
 	nextVar      Var
 	releasedVars []Var
 	freeVars     []Var
@@ -178,6 +201,7 @@ type Solver struct {
 
 	Solves       uint64
 	Starts       uint64
+	Blocked      uint64 // restarts held off by the trail blocking rule
 	Decisions    uint64
 	Propagations uint64
 	Conflicts    uint64
@@ -700,14 +724,17 @@ func (s *Solver) solve(options *SolverOptions) LBool {
 	// Search
 	currRestarts := 0
 	for status != LTrue && status != LFalse { // this means status == LUndef
-		var resetBase float64
-		if options.LubyRestart {
-			resetBase = luby(options.RestartInc, currRestarts)
-		} else {
-			resetBase = math.Pow(options.RestartInc, float64(currRestarts))
+		// The scheduled policies bound the segment with a conflict budget; the
+		// dynamic ones decide inside search and take no budget.
+		budget := -1
+		switch options.RestartPolicy {
+		case RestartLuby:
+			budget = int(luby(options.RestartInc, currRestarts) * options.RestartFirst)
+		case RestartGeometric:
+			budget = int(math.Pow(options.RestartInc, float64(currRestarts)) * options.RestartFirst)
 		}
 
-		status = s.search(int(resetBase*options.RestartFirst), options)
+		status = s.search(budget, options)
 		if s.withinBudget() == false {
 			break
 		}
@@ -742,6 +769,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 	// backtranckLevel := 0
 	conflictC := 0
 	s.Starts++
+	s.restartBase = s.Conflicts
 
 	// for k := 0; k < 5; k++ { // for test
 	for {
@@ -755,6 +783,8 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				return LFalse
 			}
 			learntClause, backtranckLevel, lbd := s.analyze(confl, options)
+			// Before backjumping, while the trail still describes the conflict.
+			s.noteConflict(len(s.trail), lbd, options)
 			s.cancelUntil(backtranckLevel, options)
 			if debug {
 				log.Println("Propagete: The result of analyze", learntClause, backtranckLevel)
@@ -787,7 +817,7 @@ func (s *Solver) search(nofConflicts int, options *SolverOptions) LBool {
 				log.Println("search: No conflict")
 			}
 
-			if (nofConflicts >= 0 && conflictC >= nofConflicts) || !s.withinBudget() {
+			if (nofConflicts >= 0 && conflictC >= nofConflicts) || s.restartDue(options) || !s.withinBudget() {
 				if debug {
 					log.Println("search: Reached bound on number of conflicts")
 				}

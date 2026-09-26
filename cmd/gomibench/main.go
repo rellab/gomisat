@@ -67,6 +67,7 @@ func main() {
 	noLBD := flag.Bool("no-lbd", false, "manage learnt clauses by activity only, as MiniSat does")
 	reduce := flag.String("reduce", "conflicts", "reduction trigger: conflicts (Glucose), size (MiniSat) or none")
 	protectTier2 := flag.Bool("protect-tier2", false, "keep mid-tier (LBD <= 6) clauses out of the deletion candidates")
+	restart := flag.String("restart", "", "restart policy: luby, geometric, ema or ema-block (default: the solver's)")
 	flag.Parse()
 
 	if flag.NArg() == 0 {
@@ -110,7 +111,7 @@ func main() {
 	start := time.Now()
 	lastReport := start
 	for i, path := range paths {
-		r, err := run(path, *timeout, *confBudget, *noLBD, *reduce, *protectTier2)
+		r, err := run(path, *timeout, *confBudget, *noLBD, *reduce, *protectTier2, *restart)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gomibench: %s: %v\n", path, err)
 			os.Exit(1)
@@ -187,7 +188,7 @@ func collect(args []string) ([]string, error) {
 	return paths, nil
 }
 
-func run(path string, timeout float64, confBudget int64, noLBD bool, reduce string, protectTier2 bool) (result, error) {
+func run(path string, timeout float64, confBudget int64, noLBD bool, reduce string, protectTier2 bool, restart string) (result, error) {
 	buf, err := os.ReadFile(path)
 	if err != nil {
 		return result{}, err
@@ -203,6 +204,9 @@ func run(path string, timeout float64, confBudget int64, noLBD bool, reduce stri
 	options.ReduceByConflicts = reduce == "conflicts"
 	options.NoReduce = reduce == "none"
 	options.ProtectTier2 = protectTier2
+	if restart != "" {
+		options.RestartPolicy = restart
+	}
 	s.AddCNF(cnf, options)
 	if confBudget >= 0 {
 		s.SetConfBudget(confBudget)

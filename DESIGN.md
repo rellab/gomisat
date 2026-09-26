@@ -72,7 +72,7 @@ and gomisat's own fresh-WMC mode.
 | phase | content | status |
 | --- | --- | --- |
 | 0 | public API for repeated queries, regression and benchmark infrastructure | done |
-| 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, clause arena, conflict-driven reduction schedule (**done**, measured below); restart policy, vivification and basic inprocessing still open | in progress |
+| 1 | minimum-modern CDCL: LBD + tiered learnt-clause management, clause arena, conflict-driven reduction schedule, dynamic restarts (**done**, all measured below); vivification and basic inprocessing still open | in progress |
 | 2 | component decomposition + component cache | |
 | 3 | weighted model counting | |
 | 4 | repeated-query API + persistent cache across calls | |
@@ -277,18 +277,62 @@ conflicts than activity ordering -- for a small time win. That is the shipped
 default (`UseLBD`, `ReduceByConflicts`, `ProtectTier2` off), and the losing
 settings stay switchable because they are the arms of this measurement.
 
-**Where that leaves the solver.** Over the whole corpus, in the shipped
-configuration:
+**Where that leaves the solver.** Over the whole corpus, in the configuration of
+this pass: 1222 of 1234 instances decided in 728 s, against 1206 in 864 s before
+it, median time per instance 0.733 of what it was. Twelve were left undecided
+within 10 s: the ten `par32` instances and `hole10`, which CaDiCaL does not decide
+in 60 s either, and `uuf250-087`. The restart work in the next pass takes care of
+that last one.
+
+## Phase 1, third pass: restarts
+
+MiniSat restarts on a Luby sequence: a schedule fixed in advance that cannot see
+how the search is going. Two replacements were measured, on the 329 instances of
+`uuf225-960`, `uuf250-1065`, `uf250-1065`, `bmc` and `beijing`, 10 s each.
+
+`ema` is Biere's rule: keep a fast (alpha = 1/32) and a slow (alpha = 1/16384)
+exponential moving average of the literal block distance of the learnt clauses and
+restart when the fast one exceeds the slow one by 25 %, meaning what is being
+learnt right now is worse than the run's own standard.
+
+`ema-block` adds Glucose's blocking rule: when the trail is more than 1.4 times
+its usual length the assignment looks promising, so a restart would throw good
+work away. Here that is expressed by pulling the fast average back to the slow
+one, which is what Glucose achieves by clearing its recent-LBD queue.
+
+| policy | solved | total | median time | median conflicts |
+| --- | --- | --- | --- | --- |
+| `luby` (MiniSat) | 328 | 585 s | 1.000 | 1.000 |
+| `ema` | 329 | 470 s | 0.843 | 0.912 |
+| **`ema-block`** | **329** | **415 s** | **0.749** | **0.849** |
+
+`ema-block` is best or tied in every family, and it wins on both satisfiable and
+unsatisfiable instances: `uuf250` 347 s -> 232 s, `uf250` 145 s -> 106 s. It is the
+default; the others stay selectable.
+
+Over the whole corpus this is where phase 1 ends up:
 
 |  | instances decided | total time |
 | --- | --- | --- |
-| before this pass (defective bookkeeping) | 1206 | 864 s |
-| **after** | **1222 of 1234** | **728 s** |
+| at the start of this work (defective bookkeeping) | 1206 | 864 s |
+| after the arena and the reduction schedule (Luby restarts) | 1222 | 728 s |
+| **with dynamic restarts** | **1223 of 1234** | **599 s** |
 
-Median time per instance 0.733 of what it was. Twelve instances are left
-undecided within 10 s: the ten `par32` instances and `hole10`, which CaDiCaL does
-not decide in 60 s either, and `uuf250-087`. That last one is the only instance in
-the corpus where a modern solver succeeds and this one does not.
+The eleven that are left are the ten `par32` instances and `hole10`, and CaDiCaL
+does not decide any of them in 60 s either. **Every instance of the corpus that an
+independent modern solver decides in 60 s, this one now decides in 10 s.**
+
+The recorded arms are `bench/corpus-t10.csv` for the current default and
+`bench/corpus-t10-defective-*.csv` for the code as it was before the bookkeeping
+defects were found, which cannot be reproduced any more. Every other arm in the
+tables above is reproducible from the flags: `gomibench -no-lbd`,
+`-reduce size|none`, `-protect-tier2`, `-restart luby|ema|ema-block`.
+
+Blocking needs the lower bound Glucose gives it. Without the rule that nothing is
+blocked before 10 000 conflicts, the trail average has not settled, the rule fires
+from the first conflicts on, and the solver stops restarting almost completely --
+two restarts over a 9 600-conflict run in one measured case, which cost a factor
+of three on that instance.
 
 ## Invariants
 
@@ -370,9 +414,6 @@ path on the committed test data hid them.
   literals. Halving their size by making `Var` and `Lit` 32-bit would shrink a
   watcher to 8 bytes and the literal store by half; that is the next measurable
   lever on cost per conflict.
-- **The restart policy is still MiniSat's Luby sequence.** Given how much the
-  reduction schedule mattered, this is the obvious next policy to measure, and it
-  is the remaining item of phase 1.
 - **The committed corpus cannot measure search changes**, only correctness: all
   2185 instances together take under 0.8 s. The external corpus covers this, but
   it too runs out of difficulty on structured families, where the conflict ratio

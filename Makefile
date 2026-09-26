@@ -4,7 +4,7 @@ BASELINE  := bench/baseline.csv
 # The large corpus lives outside the repository; see scripts/fetch-corpus.sh.
 EXTCORPUS := $(if $(GOMISAT_CORPUS),$(GOMISAT_CORPUS),$(HOME)/.cache/gomisat/corpus)
 TIMEOUT   := 10
-EXTBASE   := bench/corpus-t$(TIMEOUT)-repaired-lbd.csv
+EXTBASE   := bench/corpus-t$(TIMEOUT).csv
 EXPECTED  := corpus/expected.tsv
 
 .PHONY: all build test test-full check fmt vet bench bench-suite baseline \

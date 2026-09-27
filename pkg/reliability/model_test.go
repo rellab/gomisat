@@ -367,3 +367,54 @@ func TestMultiStateReliability(t *testing.T) {
 		}
 	}
 }
+
+// TestAtLeastBalancedCounts checks the totalizer encoding against the same
+// binomial sums as the sequential one, so that the two are interchangeable before
+// anything is concluded from comparing them.
+func TestAtLeastBalancedCounts(t *testing.T) {
+	for n := 1; n <= 8; n++ {
+		for k := 0; k <= n+1; k++ {
+			seq := New()
+			seq.Assert(seq.AtLeastSequential(k, seq.Events("x", n)...))
+			bal := New()
+			bal.Assert(bal.AtLeastBalanced(k, bal.Events("x", n)...))
+
+			want := big.NewInt(0)
+			for i := k; i <= n; i++ {
+				if i >= 0 {
+					want.Add(want, binomial(n, i))
+				}
+			}
+			if k > n {
+				want = big.NewInt(0)
+			}
+			if got := countCNF(t, bal); got.Cmp(want) != 0 {
+				t.Errorf("balanced %d-out-of-%d: count = %v, want %v", k, n, got, want)
+			}
+			if got := countCNF(t, seq); got.Cmp(want) != 0 {
+				t.Errorf("sequential %d-out-of-%d: count = %v, want %v", k, n, got, want)
+			}
+		}
+	}
+}
+
+// TestAtLeastBalancedReliability checks the weighted answer too.
+func TestAtLeastBalancedReliability(t *testing.T) {
+	const p = 0.8
+	for n := 2; n <= 9; n++ {
+		for k := 1; k <= n; k++ {
+			m := New()
+			events := m.Events("x", n)
+			m.Assert(m.AtLeastBalanced(k, events...))
+			for _, e := range events {
+				m.SetProbability(e, p)
+			}
+			want := 0.0
+			for i := k; i <= n; i++ {
+				c, _ := new(big.Float).SetInt(new(big.Int).Binomial(int64(n), int64(i))).Float64()
+				want += c * math.Pow(p, float64(i)) * math.Pow(1-p, float64(n-i))
+			}
+			approx(t, m.Reliability(), want, fmt.Sprintf("balanced %d-out-of-%d", k, n))
+		}
+	}
+}

@@ -25,6 +25,10 @@ const (
 	// BranchEliminationOrder picks the variable eliminated latest by a min-degree
 	// elimination order of the primal graph, breaking ties by occurrence.
 	BranchEliminationOrder = "order"
+	// BranchExplicit uses the priorities in CountOptions.Priority, highest first.
+	// It is how a model that knows its own structure can say what the order should
+	// be, instead of having it recovered from the CNF; see DESIGN.md, phase 5.
+	BranchExplicit = "explicit"
 )
 
 // maxEliminationVars is the size beyond which the elimination order is not worth
@@ -37,6 +41,17 @@ const maxEliminationVars = 20000
 // and counting neither learns nor deletes any, so a sequence of queries over one
 // formula must not pay for it more than once. Recomputing it per query was 64 % of
 // the running time of a study before this was memoised.
+// countingOrder returns the variable priorities the counter should branch by.
+func (s *Solver) countingOrderFor(copt *CountOptions) []int32 {
+	switch copt.Branching {
+	case BranchExplicit:
+		return copt.Priority
+	case BranchEliminationOrder:
+		return s.countingOrder()
+	}
+	return nil
+}
+
 func (s *Solver) countingOrder() []int32 {
 	if s.countOrderValid == false {
 		s.countOrder = s.eliminationScores(s.clauses)

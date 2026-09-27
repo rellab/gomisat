@@ -38,6 +38,9 @@ type CountOptions struct {
 	// Precision is the mantissa width of the weighted accumulator, in bits.
 	// Zero means 256, which is far more than a reliability figure needs.
 	Precision uint
+	// Priority gives each variable a branching priority, highest first, for
+	// Branching == BranchExplicit. Variables outside its range have priority zero.
+	Priority []int32
 	// ExactCache keys the component cache by the full description of a component
 	// rather than by a 128-bit hash of it. It removes a collision probability of
 	// about 10^-27 at a million entries, and costs a great deal of memory; see
@@ -108,9 +111,7 @@ func (s *Solver) CountModels(options *SolverOptions, copt *CountOptions) (*big.I
 	for v := 0; v < n; v++ {
 		c.allVars[v] = Var(v)
 	}
-	if copt.Branching == BranchEliminationOrder {
-		c.order = s.countingOrder()
-	}
+	c.order = s.countingOrderFor(copt)
 	total := c.run()
 	c.stats.CacheSize = len(c.cache)
 	return total, c.stats

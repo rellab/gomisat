@@ -190,12 +190,24 @@ func (m *Model) Or(inputs ...Node) Node {
 	return g
 }
 
-// AtLeast returns a node that is true exactly when at least k of the inputs are.
-// It is built from And and Or gates, so it is counting-safe for the same reason
-// they are.
+// AtLeast returns a node that is true exactly when at least k of the inputs are:
+// the k-out-of-n system, where k is what a design study varies.
 //
-// This is the k-out-of-n system, and k is what a design study varies.
+// It uses the balanced encoding. The two encodings describe the same function and
+// both are counting-safe, but they cost very differently to count: on an importance
+// analysis over 36 multi-state components the balanced one needed a fifth of the
+// work per query and a fifth of the cache, and its cost grew more slowly with the
+// number of components. See DESIGN.md, phase 5. AtLeastSequential is kept because
+// it is the other arm of that measurement.
 func (m *Model) AtLeast(k int, inputs ...Node) Node {
+	return m.AtLeastBalanced(k, inputs...)
+}
+
+// AtLeastSequential is AtLeast built by chaining the components one after another:
+// "at least j of the inputs from i on" in terms of "at least j-1 of the inputs from
+// i+1 on". It is the obvious encoding and the more expensive one to count, because
+// every sub-formula spans the whole chain.
+func (m *Model) AtLeastSequential(k int, inputs ...Node) Node {
 	n := len(inputs)
 	switch {
 	case k <= 0:
@@ -363,4 +375,106 @@ func (m *Model) Reliability() *big.Float {
 	s.AddCNF(&gomisat.CNF{NumVars: numVars, NumClauses: len(clauses), Clauses: clauses}, options)
 	value, _ := s.WeightedCount(options, gomisat.DefaultCountOptions(), m.Weights())
 	return value
+}
+
+// StructureOrder returns branching priorities that follow the order in which the
+// model was built: the variables created first get the highest priority, so the
+// counter branches on them first.
+//
+// This is the order the model knows and the CNF does not. Whether it is a better
+// order than the one recovered from the clauses by elimination is a question about
+// what a branching order is for, and the two answers pull apart: see DESIGN.md,
+// phase 5. A study walks through queries that condition on one component after
+// another, and the sub-problems two such queries share are the ones over the
+// components the queries have not touched. Following the construction order makes
+// those sub-problems come out identical, so they can be reused; an order chosen to
+// split the formula fastest does not have to.
+func (m *Model) StructureOrder() []int32 {
+	order := make([]int32, len(m.names))
+	for i := range order {
+		order[i] = int32(len(m.names) - i)
+	}
+	return order
+}
+
+// ReverseStructureOrder is StructureOrder the other way round, as the control for
+// the same measurement.
+func (m *Model) ReverseStructureOrder() []int32 {
+	order := make([]int32, len(m.names))
+	for i := range order {
+		order[i] = int32(i + 1)
+	}
+	return order
+}
+
+// AtLeastBalanced is AtLeast built over a balanced tree of unary counters -- a
+// totalizer -- instead of the sequential recursion AtLeast uses.
+//
+// Both encodings are counting-safe and describe the same function. They differ in
+// what their sub-formulas look like, and that is what a sequence of queries feels.
+// The sequential encoding chains every component to the next, so a sub-formula
+// spans the whole chain and conditioning on one component changes nearly all of
+// them. In the balanced tree a subtree that does not contain the conditioned
+// component is untouched, so its counts can be reused by the next query. See
+// DESIGN.md, phase 5, for what that is worth in practice.
+func (m *Model) AtLeastBalanced(k int, inputs ...Node) Node {
+	switch {
+	case k <= 0:
+		return m.True()
+	case k > len(inputs):
+		return m.False()
+	case len(inputs) == 1:
+		return inputs[0]
+	}
+	return m.totalizer(inputs)[k-1]
+}
+
+// totalizer returns the unary count of a set of inputs: element i of the result is
+// true exactly when at least i+1 of the inputs are.
+//
+// Each count variable is determined by the inputs, in both directions, which is
+// what keeps the model count equal to the count over the events.
+func (m *Model) totalizer(inputs []Node) []Node {
+	if len(inputs) == 1 {
+		return []Node{inputs[0]}
+	}
+	mid := len(inputs) / 2
+	a := m.totalizer(inputs[:mid])
+	b := m.totalizer(inputs[mid:])
+
+	out := make([]Node, len(inputs))
+	for i := range out {
+		out[i] = m.newVar(fmt.Sprintf("count%d>=%d", len(m.names)+1, i+1), false)
+	}
+
+	for i := 0; i <= len(a); i++ {
+		for j := 0; j <= len(b); j++ {
+			// At least i of the left and j of the right means at least i+j of both.
+			if s := i + j; s >= 1 && s <= len(out) {
+				lits := make([]int64, 0, 3)
+				lits = append(lits, int64(out[s-1]))
+				if i >= 1 {
+					lits = append(lits, -int64(a[i-1]))
+				}
+				if j >= 1 {
+					lits = append(lits, -int64(b[j-1]))
+				}
+				m.clause(lits...)
+			}
+			// Fewer than i+1 on the left and fewer than j+1 on the right means
+			// fewer than i+j+1 of both.
+			if s := i + j + 1; s <= len(out) {
+				lits := make([]int64, 0, 3)
+				lits = append(lits, -int64(out[s-1]))
+				if i < len(a) {
+					lits = append(lits, int64(a[i]))
+				}
+				if j < len(b) {
+					lits = append(lits, int64(b[j]))
+				}
+				m.clause(lits...)
+			}
+		}
+	}
+	return out
 }

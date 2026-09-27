@@ -201,9 +201,7 @@ func newWeightedCounter(s *Solver, options *SolverOptions, copt *CountOptions, w
 	for v := 0; v < n; v++ {
 		c.allVars[v] = Var(v)
 	}
-	if copt.Branching == BranchEliminationOrder {
-		c.order = s.countingOrder()
-	}
+	c.order = s.countingOrderFor(copt)
 
 	return c
 }
@@ -526,8 +524,12 @@ func (c *weightedCounter) branchVar(comp *component) Var {
 	if c.order != nil {
 		best, bestOrder, bestCount := comp.vars[0], int32(-1), int32(-1)
 		for _, v := range comp.vars {
-			if c.order[v] > bestOrder || (c.order[v] == bestOrder && c.occ[v] > bestCount) {
-				best, bestOrder, bestCount = v, c.order[v], c.occ[v]
+			priority := int32(0)
+			if int(v) < len(c.order) {
+				priority = c.order[v]
+			}
+			if priority > bestOrder || (priority == bestOrder && c.occ[v] > bestCount) {
+				best, bestOrder, bestCount = v, priority, c.occ[v]
 			}
 		}
 		return best

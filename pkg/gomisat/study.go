@@ -35,7 +35,8 @@ type Study struct {
 	options *SolverOptions
 	copt    *CountOptions
 	weights *Weights
-	cache   map[string]*big.Float
+	cache   map[cacheKey]*big.Float
+	counter *weightedCounter
 
 	queries uint64
 	total   CountStats
@@ -54,7 +55,7 @@ func NewStudy(s *Solver, options *SolverOptions, copt *CountOptions, weights *We
 		options: options,
 		copt:    copt,
 		weights: weights,
-		cache:   make(map[string]*big.Float),
+		cache:   make(map[cacheKey]*big.Float),
 	}
 }
 
@@ -81,7 +82,10 @@ func (st *Study) Count(assumptions ...Lit) (*big.Float, CountStats) {
 		}
 	}
 
-	value, stats := s.weightedCount(st.options, st.copt, st.weights, st.cache)
+	if st.counter == nil {
+		st.counter = newWeightedCounter(s, st.options, st.copt, st.weights, st.cache)
+	}
+	value, stats := st.counter.count1()
 	s.cancelUntil(level, st.options)
 
 	st.queries++
@@ -104,5 +108,8 @@ func (st *Study) Totals() CountStats { return st.total }
 // ClearCache drops the memoised components. It is what a study has to do when the
 // weights change, since a cached value is a weighted count.
 func (st *Study) ClearCache() {
-	st.cache = make(map[string]*big.Float)
+	st.cache = make(map[cacheKey]*big.Float)
+	if st.counter != nil {
+		st.counter.cache = st.cache
+	}
 }

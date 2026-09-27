@@ -184,6 +184,11 @@ type Solver struct {
 	reduceAt       uint64
 	reduceInterval uint64
 
+	// Memoised elimination order for counting (branch.go). Invalidated whenever a
+	// clause is added, which is the only thing that can change it.
+	countOrder      []int32
+	countOrderValid bool
+
 	// Restart statistics (restart.go).
 	emaFastLBD  float64
 	emaSlowLBD  float64
@@ -351,6 +356,7 @@ func (s *Solver) AddClause(ps ...Lit) bool {
 		// set clause
 		c := s.arena.alloc(ps, false, true)
 		s.clauses = append(s.clauses, c)
+		s.countOrderValid = false
 		s.AttachClause(c)
 		if debug {
 			log.Println("AddClause: ps becomes a clause (two or more literals)", c)

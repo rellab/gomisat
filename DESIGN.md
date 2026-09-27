@@ -509,15 +509,71 @@ state, so 80 of them.
 
 Decisions fall to 0.22 of what they were, time only to 0.67. The gap between those
 two numbers is the next thing to fix rather than a disappointment: with the search
-cut by a factor of four and a half, what is left is per-node overhead -- building a
-cache key as a byte string and allocating a `big.Float` at every node. A packed key
-and a cache that does not allocate per lookup are phase 4 engineering that phase 5
-needs anyway.
+cut by a factor of four and a half, what is left is per-node overhead. The guess
+made here first -- that it was the byte-string cache key and the `big.Float`
+allocation -- was wrong, and the section below says what it actually was.
 
 `TestStudyMatchesFreshCounts` is the reuse invariant, the counterpart of the
 solver's reused-against-fresh test: a query answered with a cache carried over from
 earlier queries must agree with a fresh counter. It compares to within the precision
 rather than bit for bit, for the reason recorded under Known gaps.
+
+## Phase 4, second pass: where the overhead really was
+
+The prediction was that the cost left after the cache had cut the search would be
+the byte-string key and the `big.Float` per node. A profile disagreed on every
+count. What it found, in the order the items were removed:
+
+**The elimination order was recomputed for every query** -- 64 % of a query
+sequence, and the single largest item by far. The order depends on the clauses
+alone, and counting neither learns nor deletes any, so it is now computed once per
+solver and invalidated when a clause is added. Per query on the importance-analysis
+sequence: 8.5 ms to 0.22 ms.
+
+**`sort.Slice` in the hot path**, used to put a component's variables in canonical
+order, and it goes through reflection. It is not needed at all: the component a
+residual comes from already has its variables sorted, so walking that list and
+keeping the ones that survive produces the same order in a linear pass. Worth 20 %
+of a deep count.
+
+**Union-find called again and again.** `split` was calling `find` for every
+variable in three passes and for every clause twice. Resolving each variable's group
+once into an array, and reading the array afterwards, was worth another 7 %.
+
+**The cache key was the memory.** A component's full description -- every clause
+reference and every unassigned variable, as varints -- runs to hundreds of bytes,
+and a deep count stores hundreds of thousands of them. The default is now a 128-bit
+digest of that description. Two components can then collide and be handed each
+other's count; with a million entries the chance of any collision is about
+10^-27, which is the trade every search-based counter makes and is what the
+"probabilistic" in GANAK's description of itself refers to. The exact key stays
+available as `CountOptions.ExactCache`, and `TestHashedCacheAgreesWithExact` runs
+both and requires the same answers.
+
+**Component storage came from the heap, per node.** It now comes from chunked
+arenas with a stack discipline, which is what a depth-first recursion wants: a mark
+on entry, a release on the way out, and chunks that are never reallocated so a slice
+handed out stays valid. This one needed two attempts. Sizing the allocations exactly
+meant scanning the clauses twice, which measured 20 % *slower* -- the scan is the
+counter's most-executed loop, and the allocation it saved was not worth doing it
+again. Taking the storage at an upper bound and leaving the tail unused is what
+works, because the arena reclaims it at the next release anyway.
+
+Measured on one count of a k-out-of-n system with n = 70, k = 35, which is
+252 844 decisions in both arms and therefore exactly the same search:
+
+|  | time | allocated | objects |
+| --- | --- | --- | --- |
+| before | 23.848 s | 16 683 MB | 10 008 327 |
+| **after** | **18.738 s** | **129 MB** | **1 849 397** |
+
+Time to 0.79, memory to 1/130. On the query sequence, time per query from 8.5 ms to
+0.22 ms and total allocation from 341 MB to 29 MB.
+
+The lesson is the one this project keeps relearning: the profile disagreed with the
+prediction every time, and the two changes that looked most like optimisations --
+sizing allocations exactly, and removing allocation from the component path --
+were the two that had to be measured twice before they helped.
 
 ## Invariants
 
@@ -608,10 +664,12 @@ path on the committed test data hid them.
 - No proof logging (DRAT/LRAT), no bounded variable elimination, no
   `SimpSolver` equivalent.
 - Clause addition after the first solve is untested.
-- **The cache is a `map[string]` keyed by a packed byte string**, holding a
-  `big.Int` or a `big.Float`. It is correct and generous with both memory and
-  allocation, and nothing evicts from it. Now that the cache has cut the search,
-  this overhead is where the remaining time goes.
+- **Nothing evicts from the cache.** It is bounded only by the run, which is
+  tolerable for the studies measured so far and will not be for phase 5.
+- **The unweighted counter was left unoptimised on purpose.** It still keys its
+  cache by the full component description, allocates components from the heap and
+  sorts with `sort.Slice`. It is the reference implementation the weighted one is
+  checked against, and keeping it simple is worth more than making it fast.
 - **A weighted count is not reproducible bit for bit** between a cached and an
   uncached evaluation, because the cache changes the order of the floating-point
   products; the values agree to about 77 decimal digits at the default precision.

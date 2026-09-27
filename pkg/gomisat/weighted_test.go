@@ -152,3 +152,50 @@ func TestWeightedSurvivesUnderflow(t *testing.T) {
 		t.Errorf("as a float64 this is %g, so the test is not exercising underflow any more", f)
 	}
 }
+
+// TestHashedCacheAgreesWithExact checks the 128-bit component digest against the
+// full component description. A collision would show up as a wrong count, and this
+// is the only thing standing between the default cache and that risk.
+func TestHashedCacheAgreesWithExact(t *testing.T) {
+	rng := rand.New(rand.NewSource(20260930))
+	for i := 0; i < 200; i++ {
+		nvars := 4 + rng.Intn(12)
+		nclauses := int(float64(nvars) * (1.0 + 2.0*rng.Float64()))
+		clauses := randomCNF(rng, nvars, nclauses, 3)
+		pTrue := make([]float64, nvars)
+		for v := range pTrue {
+			pTrue[v] = 0.05 + 0.9*rng.Float64()
+		}
+
+		hashed := weightedWith(t, clauses, nvars, pTrue, &CountOptions{
+			UseCache: true, UseDecomposition: true, Branching: BranchEliminationOrder})
+		exact := weightedWith(t, clauses, nvars, pTrue, &CountOptions{
+			UseCache: true, UseDecomposition: true, Branching: BranchEliminationOrder, ExactCache: true})
+
+		if hashed.Cmp(exact) != 0 {
+			t.Fatalf("case %d: the hashed cache says %v, the exact cache says %v\nclauses=%v",
+				i, hashed, exact, clauses)
+		}
+	}
+}
+
+// TestHashComponentDistinguishes checks that the digest reacts to the things that
+// distinguish one component from another, including moving an element between the
+// two lists.
+func TestHashComponentDistinguishes(t *testing.T) {
+	base := hashComponent([]Var{1, 2, 3}, []CRef{10, 11})
+	cases := map[string]cacheKey{
+		"a variable added":      hashComponent([]Var{1, 2, 3, 4}, []CRef{10, 11}),
+		"a variable changed":    hashComponent([]Var{1, 2, 4}, []CRef{10, 11}),
+		"variables reordered":   hashComponent([]Var{1, 3, 2}, []CRef{10, 11}),
+		"a clause added":        hashComponent([]Var{1, 2, 3}, []CRef{10, 11, 12}),
+		"a clause changed":      hashComponent([]Var{1, 2, 3}, []CRef{10, 12}),
+		"one fewer of each":     hashComponent([]Var{1, 2}, []CRef{10}),
+		"lists of equal values": hashComponent([]Var{1, 2}, []CRef{3, 10, 11}),
+	}
+	for name, other := range cases {
+		if other == base {
+			t.Errorf("%s: the digest did not change", name)
+		}
+	}
+}

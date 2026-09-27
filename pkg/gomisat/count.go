@@ -38,6 +38,11 @@ type CountOptions struct {
 	// Precision is the mantissa width of the weighted accumulator, in bits.
 	// Zero means 256, which is far more than a reliability figure needs.
 	Precision uint
+	// ExactCache keys the component cache by the full description of a component
+	// rather than by a 128-bit hash of it. It removes a collision probability of
+	// about 10^-27 at a million entries, and costs a great deal of memory; see
+	// cachekey.go. The regression tests use it to check the hash.
+	ExactCache bool
 }
 
 func DefaultCountOptions() *CountOptions {
@@ -104,7 +109,7 @@ func (s *Solver) CountModels(options *SolverOptions, copt *CountOptions) (*big.I
 		c.allVars[v] = Var(v)
 	}
 	if copt.Branching == BranchEliminationOrder {
-		c.order = s.eliminationScores(s.clauses)
+		c.order = s.countingOrder()
 	}
 	total := c.run()
 	c.stats.CacheSize = len(c.cache)

@@ -37,9 +37,22 @@ implemented, and the counter is weighted: with a component's probability on its
 the system.
 
 Model counting decomposes the residual formula into independent components and
-memoises them, and `pkg/reliability` builds the systems it is meant to count --
-events, AND/OR gates, k-out-of-n, multi-state components -- in an encoding whose
-auxiliary variables are determined by the events, so the count is preserved.
+memoises them. Two packages state the problems it counts: `pkg/reliability` builds
+the structure functions of coherent systems -- events, AND/OR gates, k-out-of-n,
+multi-state components -- and `pkg/csp` states finite-domain constraint problems
+with integer variables and linear constraints, which it solves as well as counts.
+Both use encodings whose auxiliary variables are determined by the originals, so
+the count is preserved.
+
+```go
+m := csp.New()
+x, y := m.IntVarRange(0, 10), m.IntVarRange(0, 10)
+m.Add(csp.LeZero(csp.NewSum(map[*csp.IntVar]int{x: 2, y: 3}, -12))) // 2x + 3y <= 12
+m.Add(csp.GeZero(csp.NewSum(map[*csp.IntVar]int{x: 1, y: -1}, 0)))  // x >= y
+
+sol, _ := m.Solve()      // sol.Int(x), sol.Int(y)
+count, _ := m.Count()    // 13
+```
 
 ```console
 $ ./bin/gomisat -count testdata/satlib/sat-uniform-20-91/uf20-01.cnf
@@ -125,6 +138,7 @@ later phases fail loudly rather than returning a wrong count.
 ```
 cmd/             single-instance solver
 cmd/gomibench/   corpus driver: CSV of per-instance results, answer checking, baseline comparison
+pkg/csp/         finite-domain constraint problems: order encoding, solving, counting
 pkg/reliability/ structure functions of coherent systems, encoded to CNF
 pkg/gomisat/     the solver and the model counter
   solver.go        CDCL search, propagation, conflict analysis

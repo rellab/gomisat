@@ -666,6 +666,66 @@ system several ways, an engine that counts them, closed forms to check the answe
 and query sequences to measure them on. That is a better shaped question than the one
 phase 5 started with, and it was arrived at by being wrong about the first one.
 
+## The CSP front end
+
+`pkg/csp` states finite-domain constraint problems -- Boolean and integer variables,
+linear sums compared against zero, combined with and, or, implication and negation
+-- and encodes them with the order encoding: an integer variable over
+d[0] < ... < d[n-1] becomes n-1 propositional variables, the k-th meaning "at most
+d[k]", chained monotone. Long sums are decomposed through auxiliary integer
+variables first. The encoder is derived from github.com/okamumu/gocsp, which follows
+Sugar's order encoding; the package is here because the open question at the end of
+phase 5 is which encoding of a model counts best, and this is a second, principled
+family of encodings to ask it with. A multi-state component is an integer variable,
+and "at least k components in state t or better" is a linear constraint rather than a
+hand-built tree of gates.
+
+It also makes the counter usable as an ordinary constraint solver, which is worth
+having on its own: `Solve` returns an assignment decoded back into the values of the
+model's own variables, `Count` the number of solutions, `WeightedCount` their
+probability.
+
+### Counting demands more of an encoding than solving does
+
+The conversion to CNF that satisfiability normally uses gives an auxiliary variable
+standing for a subformula only the implication it needs, p implies the subformula.
+For counting that is wrong: if the subformula holds and nothing forces p, then p may
+take either value and the same solution is counted twice.
+
+What makes it dangerous is that it does not always go wrong. Measured on the
+imported encoder:
+
+| model | solutions | polarity-optimised | definitional |
+| --- | --- | --- | --- |
+| `a <-> b` as two exclusive branches | 2 | 2 | 2 |
+| `(a&b) or (c&d)` | 7 | **9** | 7 |
+| three overlapping ands | 37 | **61** | 37 |
+| `x` over 0..5 with `x <= 5` | 6 | 6 | 6 |
+| `y + z <= 3` over 0..3 | 10 | 10 | 10 |
+
+The integer machinery -- the order encoding and the linear comparators -- preserves
+counts as it stands. It is the Boolean structure that does not, and only once the
+branches of a disjunction overlap: with two mutually exclusive branches the
+surrounding clauses pin the auxiliaries down, so the first case anyone tries comes
+out right. `definitional.go` defines every auxiliary in both directions, and `Count`
+refuses to answer when that conversion has been turned off rather than returning a
+number that looks right.
+
+Three defects came with the import, all reachable from ordinary use: a constraint
+added without decomposition made the encoder panic on an index, a constraint with no
+solutions made it call `log.Fatal` and exit the process instead of reporting the
+model unsatisfiable, and decoding a solution back to integer values was not
+implemented.
+
+### A note on how three of these were found
+
+The expected values in the first version of the count-preservation test were worked
+out by hand, and one of them was wrong: `(a&b) or (c&d)` has 7 solutions, not 9, so
+the encoding that answered 9 was recorded as *correct* and the definitional one that
+answered 7 as broken. The same mistake then produced a wrong expected count in an
+example. Both were caught by enumerating instead, which the tests now do throughout:
+no expected value in this package is written by hand.
+
 ## Invariants
 
 Every phase is validated against the properties in

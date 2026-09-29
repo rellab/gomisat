@@ -1,0 +1,465 @@
+package reliability
+
+import (
+	"fmt"
+	"math/big"
+
+	"github.com/rellab/gomisat/pkg/gomisat"
+)
+
+// Node is a literal: a variable of the encoding, possibly negated.
+type Node int64
+
+// Not returns the negation of a node. It costs nothing: negation is a sign, not a
+// gate.
+func (n Node) Not() Node { return -n }
+
+// Model is a system under construction.
+type Model struct {
+	names    []string // variable i is names[i-1]
+	isEvent  []bool   // whether variable i+1 is a basic event or a state level
+	events   int      // how many of them there are
+	clauses  [][]int64
+	trueNode Node
+	// weights records the literal weights of the variables that have them. The
+	// model owns them because the right rule depends on the encoding, and pairing
+	// the wrong rule with an encoding is the classic way to get a plausible but
+	// wrong reliability: see SetProbability and SetStateProbabilities.
+	weights map[Node][2]float64
+}
+
+// New returns an empty model.
+func New() *Model {
+	return &Model{
+		names:   make([]string, 0, 32),
+		weights: make(map[Node][2]float64),
+	}
+}
+
+func (m *Model) newVar(name string, event bool) Node {
+	m.names = append(m.names, name)
+	m.isEvent = append(m.isEvent, event)
+	if event {
+		m.events++
+	}
+	return Node(len(m.names))
+}
+
+// Event adds a basic event: a component that is either working or failed. Events
+// and gates may be added in any order, which is what lets a system be built one
+// subsystem at a time.
+func (m *Model) Event(name string) Node {
+	return m.newVar(name, true)
+}
+
+// Events adds count basic events named name0, name1 and so on.
+func (m *Model) Events(name string, count int) []Node {
+	out := make([]Node, 0, count)
+	for i := 0; i < count; i++ {
+		out = append(out, m.Event(fmt.Sprintf("%s%d", name, i)))
+	}
+	return out
+}
+
+// MultiState adds a component with the given number of states, encoded in order:
+// the returned node j is "the component is in state j or better", for j from 1 to
+// states-1. The chain clauses make the encoding one-to-one with the states, so
+// counting over these variables counts states rather than bit patterns.
+//
+// State 0 is the worst state and needs no variable: it is the case where every
+// returned node is false.
+func (m *Model) MultiState(name string, states int) []Node {
+	if states < 2 {
+		panic("reliability: a component needs at least two states")
+	}
+	levels := make([]Node, 0, states-1)
+	for j := 1; j < states; j++ {
+		levels = append(levels, m.Event(fmt.Sprintf("%s>=%d", name, j)))
+	}
+	// Being in state j or better implies being in state j-1 or better.
+	for j := 1; j < len(levels); j++ {
+		m.clause(-int64(levels[j]), int64(levels[j-1]))
+	}
+	return levels
+}
+
+// MultiStateOneHot adds a component with the given number of states, encoded with
+// one indicator per state and an exactly-one constraint. The returned node s is
+// "the component is in state s".
+//
+// This is the encoding to use with weights. The order encoding of MultiState is
+// natural for thresholds and is one-to-one with the states, so it counts
+// correctly, but it cannot carry a state distribution on independent literal
+// weights: a component in state s leaves the levels above s false, and their
+// weights would multiply into the answer. With one indicator per state, exactly
+// one literal of the component is true in any model, so putting the probability of
+// state s on indicator s and leaving everything else at weight one makes the
+// product come out as that probability.
+func (m *Model) MultiStateOneHot(name string, states int) []Node {
+	if states < 2 {
+		panic("reliability: a component needs at least two states")
+	}
+	indicators := make([]Node, 0, states)
+	for s := 0; s < states; s++ {
+		indicators = append(indicators, m.Event(fmt.Sprintf("%s=%d", name, s)))
+	}
+	atLeastOne := make([]int64, 0, states)
+	for _, in := range indicators {
+		atLeastOne = append(atLeastOne, int64(in))
+	}
+	m.clause(atLeastOne...)
+	// At most one, pairwise. Components have few states, so this is cheap; a
+	// ladder encoding would be the alternative for many.
+	for i := 0; i < len(indicators); i++ {
+		for j := i + 1; j < len(indicators); j++ {
+			m.clause(-int64(indicators[i]), -int64(indicators[j]))
+		}
+	}
+	return indicators
+}
+
+// AtLeastState returns a node that is true when the component whose indicators
+// these are is in state threshold or better. Changing the threshold is one of the
+// systematic differences a reliability study walks through.
+func (m *Model) AtLeastState(indicators []Node, threshold int) Node {
+	if threshold <= 0 {
+		return m.True()
+	}
+	if threshold >= len(indicators) {
+		return indicators[len(indicators)-1]
+	}
+	return m.Or(indicators[threshold:]...)
+}
+
+func (m *Model) clause(lits ...int64) {
+	c := make([]int64, len(lits))
+	copy(c, lits)
+	m.clauses = append(m.clauses, c)
+}
+
+// And returns a node that is true exactly when every input is.
+func (m *Model) And(inputs ...Node) Node {
+	switch len(inputs) {
+	case 0:
+		return m.True()
+	case 1:
+		return inputs[0]
+	}
+	g := m.newVar(fmt.Sprintf("and%d", len(m.names)+1), false)
+	long := make([]int64, 0, len(inputs)+1)
+	long = append(long, int64(g))
+	for _, in := range inputs {
+		m.clause(-int64(g), int64(in)) // g -> in
+		long = append(long, -int64(in))
+	}
+	m.clause(long...) // all inputs -> g
+	return g
+}
+
+// Or returns a node that is true exactly when some input is.
+func (m *Model) Or(inputs ...Node) Node {
+	switch len(inputs) {
+	case 0:
+		return m.False()
+	case 1:
+		return inputs[0]
+	}
+	g := m.newVar(fmt.Sprintf("or%d", len(m.names)+1), false)
+	long := make([]int64, 0, len(inputs)+1)
+	long = append(long, -int64(g))
+	for _, in := range inputs {
+		m.clause(int64(g), -int64(in)) // in -> g
+		long = append(long, int64(in))
+	}
+	m.clause(long...) // g -> some input
+	return g
+}
+
+// AtLeast returns a node that is true exactly when at least k of the inputs are:
+// the k-out-of-n system, where k is what a design study varies.
+//
+// It uses the balanced encoding. The two encodings describe the same function and
+// both are counting-safe, but they cost very differently to count: on an importance
+// analysis over 36 multi-state components the balanced one needed a fifth of the
+// work per query and a fifth of the cache, and its cost grew more slowly with the
+// number of components. See DESIGN.md, phase 5. AtLeastSequential is kept because
+// it is the other arm of that measurement.
+func (m *Model) AtLeast(k int, inputs ...Node) Node {
+	return m.AtLeastBalanced(k, inputs...)
+}
+
+// AtLeastSequential is AtLeast built by chaining the components one after another:
+// "at least j of the inputs from i on" in terms of "at least j-1 of the inputs from
+// i+1 on". It is the obvious encoding and the more expensive one to count, because
+// every sub-formula spans the whole chain.
+func (m *Model) AtLeastSequential(k int, inputs ...Node) Node {
+	n := len(inputs)
+	switch {
+	case k <= 0:
+		return m.True()
+	case k > n:
+		return m.False()
+	case k == n:
+		return m.And(inputs...)
+	case k == 1:
+		return m.Or(inputs...)
+	}
+	// atLeast[i][j] is "at least j of inputs[i:]", built from the tail up.
+	//   atLeast(i, j) = (inputs[i] and atLeast(i+1, j-1)) or atLeast(i+1, j)
+	memo := make(map[[2]int]Node, n*k)
+	var build func(i, j int) Node
+	build = func(i, j int) Node {
+		if j <= 0 {
+			return m.True()
+		}
+		if n-i < j {
+			return m.False()
+		}
+		key := [2]int{i, j}
+		if got, ok := memo[key]; ok {
+			return got
+		}
+		with := m.And(inputs[i], build(i+1, j-1))
+		without := build(i+1, j)
+		g := m.Or(with, without)
+		memo[key] = g
+		return g
+	}
+	return build(0, k)
+}
+
+// AtMost returns a node that is true exactly when at most k of the inputs are.
+func (m *Model) AtMost(k int, inputs ...Node) Node {
+	negated := make([]Node, 0, len(inputs))
+	for _, in := range inputs {
+		negated = append(negated, in.Not())
+	}
+	return m.AtLeast(len(inputs)-k, negated...)
+}
+
+// True and False are constant nodes, backed by a variable fixed by a unit clause.
+func (m *Model) True() Node {
+	if m.trueNode == 0 {
+		m.trueNode = m.newVar("true", false)
+		m.clause(int64(m.trueNode))
+	}
+	return m.trueNode
+}
+
+func (m *Model) False() Node { return m.True().Not() }
+
+// Assert constrains a node to be true. Asserting the top node of a fault tree is
+// what turns the tree into the question "in how many ways does the system fail".
+func (m *Model) Assert(n Node) {
+	m.clause(int64(n))
+}
+
+// CNF returns the clauses, the total number of variables, and how many of them
+// are basic events or state levels rather than gate auxiliaries. Because every
+// auxiliary is determined by the events, the count of the CNF equals the count
+// over the event variables alone; EventVars says which those are.
+func (m *Model) CNF() (clauses [][]int64, numVars, numEvents int) {
+	out := make([][]int64, len(m.clauses))
+	for i, c := range m.clauses {
+		out[i] = append([]int64(nil), c...)
+	}
+	return out, len(m.names), m.events
+}
+
+// Dimacs renders the model in DIMACS CNF format, with the variable names as
+// comments so that a generated instance stays readable.
+func (m *Model) Dimacs() string {
+	clauses, numVars, numEvents := m.CNF()
+	var b []byte
+	b = append(b, fmt.Sprintf("c generated by pkg/reliability\nc %d events, %d variables\n", numEvents, numVars)...)
+	for i, name := range m.names {
+		b = append(b, fmt.Sprintf("c v%d %s\n", i+1, name)...)
+	}
+	b = append(b, fmt.Sprintf("p cnf %d %d\n", numVars, len(clauses))...)
+	for _, c := range clauses {
+		for _, lit := range c {
+			b = append(b, fmt.Sprintf("%d ", lit)...)
+		}
+		b = append(b, "0\n"...)
+	}
+	return string(b)
+}
+
+// EventVars returns the one-based indices of the variables that are basic events
+// or state levels. Weights belong on these; the auxiliaries must carry weight one.
+func (m *Model) EventVars() []int {
+	out := make([]int, 0, m.events)
+	for i, isEvent := range m.isEvent {
+		if isEvent {
+			out = append(out, i+1)
+		}
+	}
+	return out
+}
+
+// Names returns the variable names, index 0 being variable 1.
+func (m *Model) Names() []string {
+	out := append([]string(nil), m.names...)
+	return out
+}
+
+// SetProbability gives a binary event the probability p of being true. The
+// complement 1-p goes on the false literal, which is right exactly because the
+// event has two outcomes and the encoding uses one variable for them.
+func (m *Model) SetProbability(event Node, p float64) {
+	if event <= 0 {
+		panic("reliability: a probability belongs to a variable, not to a negation")
+	}
+	m.weights[event] = [2]float64{p, 1 - p}
+}
+
+// SetStateProbabilities gives a multi-state component its state distribution. The
+// indicators must be the ones MultiStateOneHot returned, and q[s] is the
+// probability of state s.
+//
+// The weight of a false indicator is one, not 1-q[s]. Exactly one indicator of a
+// component is true in any model, so the product over the component is the
+// probability of the state it is in; charging the false indicators their
+// complements would multiply in the complements of every other state as well. That
+// mistake produces a number that looks like a reliability and is not, which is why
+// this is a method on the model rather than something a caller assembles.
+func (m *Model) SetStateProbabilities(indicators []Node, q []float64) {
+	if len(indicators) != len(q) {
+		panic("reliability: one probability per state is required")
+	}
+	sum := 0.0
+	for _, p := range q {
+		sum += p
+	}
+	if sum < 1-1e-9 || sum > 1+1e-9 {
+		panic(fmt.Sprintf("reliability: the state probabilities sum to %g, not 1", sum))
+	}
+	for s, in := range indicators {
+		m.weights[in] = [2]float64{q[s], 1}
+	}
+}
+
+// Weights builds the literal weights of the model. A variable with no weight
+// recorded keeps weight one on both polarities, so it is counted rather than
+// weighted; mixing the two is useful when a design parameter should be enumerated
+// while the components are weighted.
+func (m *Model) Weights() *gomisat.Weights {
+	w := gomisat.NewWeights(len(m.names))
+	for node, pair := range m.weights {
+		w.Set(gomisat.Var(node-1), big.NewFloat(pair[0]), big.NewFloat(pair[1]))
+	}
+	return w
+}
+
+// Reliability is the weighted count of the model: the probability that the
+// asserted structure function holds.
+func (m *Model) Reliability() *big.Float {
+	clauses, numVars, _ := m.CNF()
+	s := gomisat.NewSolver()
+	options := gomisat.DefaultSolverOptions()
+	s.AddCNF(&gomisat.CNF{NumVars: numVars, NumClauses: len(clauses), Clauses: clauses}, options)
+	value, _ := s.WeightedCount(options, gomisat.DefaultCountOptions(), m.Weights())
+	return value
+}
+
+// StructureOrder returns branching priorities that follow the order in which the
+// model was built: the variables created first get the highest priority, so the
+// counter branches on them first.
+//
+// This is the order the model knows and the CNF does not. Whether it is a better
+// order than the one recovered from the clauses by elimination is a question about
+// what a branching order is for, and the two answers pull apart: see DESIGN.md,
+// phase 5. A study walks through queries that condition on one component after
+// another, and the sub-problems two such queries share are the ones over the
+// components the queries have not touched. Following the construction order makes
+// those sub-problems come out identical, so they can be reused; an order chosen to
+// split the formula fastest does not have to.
+func (m *Model) StructureOrder() []int32 {
+	order := make([]int32, len(m.names))
+	for i := range order {
+		order[i] = int32(len(m.names) - i)
+	}
+	return order
+}
+
+// ReverseStructureOrder is StructureOrder the other way round, as the control for
+// the same measurement.
+func (m *Model) ReverseStructureOrder() []int32 {
+	order := make([]int32, len(m.names))
+	for i := range order {
+		order[i] = int32(i + 1)
+	}
+	return order
+}
+
+// AtLeastBalanced is AtLeast built over a balanced tree of unary counters -- a
+// totalizer -- instead of the sequential recursion AtLeast uses.
+//
+// Both encodings are counting-safe and describe the same function. They differ in
+// what their sub-formulas look like, and that is what a sequence of queries feels.
+// The sequential encoding chains every component to the next, so a sub-formula
+// spans the whole chain and conditioning on one component changes nearly all of
+// them. In the balanced tree a subtree that does not contain the conditioned
+// component is untouched, so its counts can be reused by the next query. See
+// DESIGN.md, phase 5, for what that is worth in practice.
+func (m *Model) AtLeastBalanced(k int, inputs ...Node) Node {
+	switch {
+	case k <= 0:
+		return m.True()
+	case k > len(inputs):
+		return m.False()
+	case len(inputs) == 1:
+		return inputs[0]
+	}
+	return m.totalizer(inputs)[k-1]
+}
+
+// totalizer returns the unary count of a set of inputs: element i of the result is
+// true exactly when at least i+1 of the inputs are.
+//
+// Each count variable is determined by the inputs, in both directions, which is
+// what keeps the model count equal to the count over the events.
+func (m *Model) totalizer(inputs []Node) []Node {
+	if len(inputs) == 1 {
+		return []Node{inputs[0]}
+	}
+	mid := len(inputs) / 2
+	a := m.totalizer(inputs[:mid])
+	b := m.totalizer(inputs[mid:])
+
+	out := make([]Node, len(inputs))
+	for i := range out {
+		out[i] = m.newVar(fmt.Sprintf("count%d>=%d", len(m.names)+1, i+1), false)
+	}
+
+	for i := 0; i <= len(a); i++ {
+		for j := 0; j <= len(b); j++ {
+			// At least i of the left and j of the right means at least i+j of both.
+			if s := i + j; s >= 1 && s <= len(out) {
+				lits := make([]int64, 0, 3)
+				lits = append(lits, int64(out[s-1]))
+				if i >= 1 {
+					lits = append(lits, -int64(a[i-1]))
+				}
+				if j >= 1 {
+					lits = append(lits, -int64(b[j-1]))
+				}
+				m.clause(lits...)
+			}
+			// Fewer than i+1 on the left and fewer than j+1 on the right means
+			// fewer than i+j+1 of both.
+			if s := i + j + 1; s <= len(out) {
+				lits := make([]int64, 0, 3)
+				lits = append(lits, -int64(out[s-1]))
+				if i < len(a) {
+					lits = append(lits, int64(a[i]))
+				}
+				if j < len(b) {
+					lits = append(lits, int64(b[j]))
+				}
+				m.clause(lits...)
+			}
+		}
+	}
+	return out
+}

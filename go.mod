@@ -1,3 +1,3 @@
-module com.github/rellab/gomisat
+module github.com/rellab/gomisat
 
-go 1.16
+go 1.24

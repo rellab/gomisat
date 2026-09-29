@@ -98,8 +98,16 @@ func (h *VarHeap) Insert(v Var) {
 func (h *VarHeap) RemoveMin() Var {
 	x := h.heap[0]
 	h.indicies[x] = UndefIndex
-	h.heap[0] = h.heap[len(h.heap)-1]
-	h.indicies[h.heap[0]] = 0
+	// The move of the last element must be guarded: with a single element in
+	// the heap it would move x onto itself and reset indicies[x] to 0, so x
+	// would be reported as still being in the heap and Insert would silently
+	// ignore it from then on. The variable would then never be selected as a
+	// decision again, and the search could report a model in which it is
+	// unassigned.
+	if len(h.heap) > 1 {
+		h.heap[0] = h.heap[len(h.heap)-1]
+		h.indicies[h.heap[0]] = 0
+	}
 	h.heap = h.heap[:len(h.heap)-1]
 	if len(h.heap) > 1 {
 		h.percolateDown(0)

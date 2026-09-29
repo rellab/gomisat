@@ -1,8 +1,8 @@
 package test
 
 import (
-	"com.github/rellab/gomisat/pkg/gomisat"
 	"fmt"
+	"github.com/rellab/gomisat/pkg/gomisat"
 	"io"
 	"log"
 	"os"

@@ -302,3 +302,92 @@ func countBuilt(t *testing.T, m *Model) *big.Int {
 	count, _ := s.CountModels(options, gomisat.DefaultCountOptions())
 	return count
 }
+
+// TestTightBoundsPreserveCountsAndSolutions covers the domain narrowing of
+// decompSum. A tight bound lets most of an auxiliary domain be thrown away, and
+// what must not change is the set of solutions or their number.
+func TestTightBoundsPreserveCountsAndSolutions(t *testing.T) {
+	for _, n := range []int{3, 4, 5} {
+		for _, ub := range []int{1, 2, 3} {
+			for rhs := -1; rhs <= n*ub+1; rhs++ {
+				m := New()
+				vars := make([]*IntVar, n)
+				domains := make([][]int, n)
+				sum := make(map[*IntVar]int, n)
+				for i := range vars {
+					vars[i] = m.IntVarRange(0, ub)
+					domains[i] = vars[i].Domain()
+					sum[vars[i]] = 1
+				}
+				m.Add(LeZero(NewSum(sum, -rhs)))
+
+				want := enumerate(domains, func(a []int) bool {
+					total := 0
+					for _, v := range a {
+						total += v
+					}
+					return total <= rhs
+				})
+				if got := mustCount(t, m); got.Cmp(big.NewInt(int64(want))) != 0 {
+					t.Fatalf("n=%d ub=%d rhs=%d: %v models, %d solutions", n, ub, rhs, got, want)
+				}
+
+				sol, ok := m.Solve()
+				if ok != (want > 0) {
+					t.Fatalf("n=%d ub=%d rhs=%d: Solve says %v, enumeration found %d solutions",
+						n, ub, rhs, ok, want)
+				}
+				if ok {
+					total := 0
+					for _, v := range vars {
+						total += sol.Int(v)
+					}
+					if total > rhs {
+						t.Fatalf("n=%d ub=%d rhs=%d: the decoded solution sums to %d", n, ub, rhs, total)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestNarrowingWithMixedSigns covers the same for bounds in the other direction and
+// for coefficients that are not all positive, where the reasoning about which end of
+// a domain can be dropped is easy to get backwards.
+func TestNarrowingWithMixedSigns(t *testing.T) {
+	for _, coef := range [][]int{{1, 1, 1, 1}, {1, -1, 2, -2}, {-1, -1, -1, -1}, {3, -2, 1, -1}} {
+		for rhs := -6; rhs <= 6; rhs += 2 {
+			for _, ge := range []bool{false, true} {
+				m := New()
+				n := len(coef)
+				vars := make([]*IntVar, n)
+				domains := make([][]int, n)
+				sum := make(map[*IntVar]int, n)
+				for i := range vars {
+					vars[i] = m.IntVarRange(0, 2)
+					domains[i] = vars[i].Domain()
+					sum[vars[i]] = coef[i]
+				}
+				if ge {
+					m.Add(GeZero(NewSum(sum, -rhs)))
+				} else {
+					m.Add(LeZero(NewSum(sum, -rhs)))
+				}
+
+				want := enumerate(domains, func(a []int) bool {
+					total := 0
+					for i, v := range a {
+						total += coef[i] * v
+					}
+					if ge {
+						return total >= rhs
+					}
+					return total <= rhs
+				})
+				if got := mustCount(t, m); got.Cmp(big.NewInt(int64(want))) != 0 {
+					t.Fatalf("coef=%v rhs=%d ge=%v: %v models, %d solutions", coef, rhs, ge, got, want)
+				}
+			}
+		}
+	}
+}

@@ -66,6 +66,23 @@
 // count from the wrong encoding is wrong quietly, while a solve from either is
 // right.
 //
+// # Where the encoding is large
+//
+// One linear constraint costs O(n^2 d^2) clauses, n being the number of variables
+// and d the size of their domains: measured, 645 clauses for five variables over
+// 0..9 and 57 685 for forty of them, and 490 for ten variables over 0..3 against
+// 53 608 over 0..39. The decomposition keeps each encoded constraint down to three
+// variables, but the auxiliary standing for a partial sum has a domain as wide as
+// that sum can range.
+//
+// The bound the sum is compared against narrows those domains: a partial sum that
+// already exceeds the bound cannot take part in a solution whatever the rest of the
+// sum does. That is worth up to twenty times fewer clauses when the bound is tight
+// relative to a variable's range -- ten variables over 0..9 summing to at most one
+// went from 3368 clauses to 151 -- and nothing at all when it is not, which
+// includes the k-out-of-n shape over 0/1 variables that reliability models use. It
+// is never a loss: where it cannot narrow, the encoding is identical.
+//
 // # Provenance
 //
 // The encoder is derived from github.com/okamumu/gocsp, which follows the order

@@ -750,6 +750,53 @@ by variable identity, `TestEncodingIsDeterministic` holds it to that, and the fi
 version of the table above -- taken before the fix -- was comparing two arms that had
 been encoded differently.
 
+### The size of a linear constraint, and narrowing by the bound
+
+One linear constraint costs O(n^2 d^2) clauses. Measured, with one sum over n
+variables of domain size d:
+
+| | clauses | | | clauses |
+| --- | --- | --- | --- | --- |
+| n = 5, d = 10 | 645 | | d = 4, n = 10 | 490 |
+| n = 10 | 3 313 | | d = 10 | 3 313 |
+| n = 20 | 14 210 | | d = 20 | 13 378 |
+| n = 40 | 57 685 | | d = 40 | 53 608 |
+
+The decomposition holds each encoded constraint to three variables, but an auxiliary
+standing for a partial sum carries a domain as wide as that sum can range, and the
+bound the sum is compared against was not being used at all: ten variables over 0..9
+took 3 368 clauses whether the bound was 1 or 200.
+
+It can be used. A partial sum already past the bound cannot take part in a solution
+whatever the rest of the sum does, so those values can be dropped from the
+auxiliary's domain. Dropping rather than collapsing matters: the auxiliary stays
+*equal* to the sum it stands for, so each solution still extends to exactly one
+assignment of the auxiliaries and the count is untouched. The weaker decomposition
+that lets an auxiliary merely bound its sum would allow a tighter domain and would
+break counting, which is why it is not used.
+
+| one sum over ten variables of 0..9 | before | after | |
+| --- | --- | --- | --- |
+| bound 1 | 3 368 | **151** | 22.3x |
+| bound 5 | 3 368 | **549** | 6.1x |
+| bound 20 | 3 368 | 2 727 | 1.24x |
+| bound 45 and above | 3 313 | 3 313 | — |
+| forty 0/1 variables, bound 20 | 1 093 | 1 093 | — |
+
+So it pays when the bound is tight relative to a single variable's range, and not
+otherwise. In particular **it does nothing for the k-out-of-n shape** over 0/1
+variables that reliability models are made of: the merge tree is balanced, so the
+auxiliary domains are small near the leaves and the bound only bites on the topmost
+few, which are in the three-variable remainder that is never decomposed. Where it
+cannot narrow, the encoding comes out identical, so it is not a trade.
+
+What it does leave is a measurement worth taking. Forty 0/1 variables summing to at
+most twenty -- k-out-of-n with n = 40 -- is 1 093 clauses as a linear constraint
+here, against roughly 4 800 for the sequential gate construction in
+`pkg/reliability`. Which of the three encodings of that one function counts fastest
+is exactly the question phase 5 ended on, and it can now be asked with all three in
+the same module.
+
 ### A note on how three of these were found
 
 The expected values in the first version of the count-preservation test were worked

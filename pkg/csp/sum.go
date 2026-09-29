@@ -90,3 +90,28 @@ func (s *Sum) copy() *Sum {
 		b:    s.b,
 	}
 }
+
+// bounds returns the least and greatest value the sum can take, counting its
+// constant and skipping the given variables.
+func (s *Sum) bounds(skip ...*IntVar) (lo, hi int) {
+	lo, hi = s.b, s.b
+	for v, a := range s.coef {
+		skipped := false
+		for _, x := range skip {
+			if v == x {
+				skipped = true
+				break
+			}
+		}
+		if skipped {
+			continue
+		}
+		first, last := a*v.domain[0], a*v.domain[v.domain.size()-1]
+		if first > last {
+			first, last = last, first
+		}
+		lo += first
+		hi += last
+	}
+	return lo, hi
+}

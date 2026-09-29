@@ -138,6 +138,7 @@ later phases fail loudly rather than returning a wrong count.
 ```
 cmd/             single-instance solver
 cmd/gomibench/   corpus driver: CSV of per-instance results, answer checking, baseline comparison
+cmd/gomiencode/  compares encodings of one reliability model by what it costs to count them
 pkg/csp/         finite-domain constraint problems: order encoding, solving, counting
 pkg/reliability/ structure functions of coherent systems, encoded to CNF
 pkg/gomisat/     the solver and the model counter

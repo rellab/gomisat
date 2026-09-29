@@ -806,6 +806,84 @@ answered 7 as broken. The same mistake then produced a wrong expected count in a
 example. Both were caught by enumerating instead, which the tests now do throughout:
 no expected value in this package is written by hand.
 
+## The encoding comparison phase 5 asked for
+
+Three ways of stating the same k-out-of-n system, counted by the same engine:
+a chain of gates (`AtLeastSequential`), a balanced tree of unary counters
+(`AtLeast`), and one linear constraint over order-encoded variables (`pkg/csp`).
+`cmd/gomiencode` builds all three, requires them to agree with each other and with
+the closed form, and measures them. Component reliability 0.9, k = n/2, weighted
+count for the binary family.
+
+**Components that either work or fail.**
+
+| n | encoding | clauses | vars | decisions | count |
+| --- | --- | --- | --- | --- | --- |
+| 20 | gates, sequential | 662 | 241 | 500 | 0.017 s |
+| 20 | gates, balanced | 557 | 108 | 334 | 0.003 s |
+| 20 | **linear, order encoded** | **314** | **76** | **256** | **0.001 s** |
+| 40 | gates, sequential | 2 522 | 881 | 13 782 | 0.383 s |
+| 40 | gates, balanced | 1 993 | 256 | 1 364 | 0.029 s |
+| 40 | **linear** | **1 093** | **192** | **982** | **0.012 s** |
+| 60 | gates, sequential | 5 582 | 1 921 | 35 474 | 1.803 s |
+| 60 | gates, balanced | 4 253 | 416 | 3 094 | 0.115 s |
+| 60 | **linear** | **2 254** | **324** | 3 828 | **0.080 s** |
+| 100 | gates, balanced | 11 245 | 772 | 8 654 | 0.703 s |
+| 100 | **linear** | **5 640** | **608** | **8 008** | **0.429 s** |
+| 140 | gates, balanced | 21 469 | 1 144 | **17 014** | 2.359 s |
+| 140 | linear | **10 600** | **928** | 33 918 | **2.160 s** |
+
+**Components with four states, working at state 2 or better.** Counting state
+configurations rather than probability, for the reason below.
+
+| n | encoding | clauses | vars | decisions | count |
+| --- | --- | --- | --- | --- | --- |
+| 40 | one-hot + gates, sequential | 2 922 | 1 041 | 13 942 | 0.496 s |
+| 40 | one-hot + gates, balanced | 2 393 | 416 | 1 524 | 0.048 s |
+| 40 | **linear + order encoded states** | **1 253** | **312** | **982** | **0.021 s** |
+
+Four things come out of this.
+
+**The linear constraint wins on both families.** About half the clauses of the
+balanced tree, fewer variables, and faster: 2.3x at forty components in either
+family, narrowing to 1.09x at a hundred and forty. The sequential chain is hopeless
+and gets worse with n, which the phase 5 measurement already showed from the other
+direction.
+
+**Decisions and time part company at scale.** At n = 140 the linear encoding takes
+twice the decisions of the balanced tree and is still faster, because its formula is
+half the size. Counting cost is not decisions alone; propagation over a smaller
+formula is cheaper per decision, and an encoding that trades a few more decisions
+for a much smaller formula can win.
+
+**The encoding decides how much cross-query reuse there is.** On the query sequence
+of an importance analysis, decisions per query with the cache carried over, and the
+ratio against clearing it:
+
+| n | gates, balanced | linear |
+| --- | --- | --- |
+| 60 | 1 950 (0.662) | 2 449 (0.683) |
+| 80 | 3 532 (0.663) | **2 221** (0.525) |
+| 100 | 5 573 (0.663) | **4 111** (0.522) |
+| 140 | 11 058 (0.663) | **5 501** (0.163) |
+
+The balanced tree sits at 0.663 from sixty components to a hundred and forty; the
+linear form falls to 0.163, and its cost per query is half. This is the phase 5
+hypothesis in the form that survives. Not "the model tells the cache which entries
+to keep" -- that was refuted -- but "the model chooses a statement of the problem
+whose sub-problems repeat", and the effect grows with the size of the system.
+
+**The winner is not yet usable for weighted multi-state reliability.** For binary
+components the linear form is weightable and was checked against the closed form: a
+variable of domain 0..1 has one propositional variable, and putting 1-p and p on it
+is exactly right. For multi-state components it is not, and for the reason recorded
+under phase 3: the order encoding of a state cannot carry a state distribution on
+independent literal weights, because the levels above the component's state are
+false and drag their weights into the product. So the multi-state family above is
+compared on configuration counts. Getting the probability as well would mean stating
+the states one-hot and the cardinality linearly -- a hybrid neither measured here nor
+obviously a winner, and the next thing to try.
+
 ## Invariants
 
 Every phase is validated against the properties in

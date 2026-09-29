@@ -29,9 +29,33 @@ type definer struct {
 // all determined by the original variables.
 func definitional(c Constraint, cnf []Clause, auxvars []*BoolVar) ([]Clause, []*BoolVar) {
 	d := &definer{cnf: cnf, aux: auxvars}
-	d.cnf = append(d.cnf, Clause{d.define(c)})
+	d.assert(c)
 	d.splitNonSimple()
 	return d.cnf, d.aux
+}
+
+// assert states that a constraint holds. A constraint being asserted needs no
+// variable of its own: a conjunction is asserted by asserting its arguments, and a
+// disjunction becomes one clause. Only the arguments that are not literals need
+// defining, and those still need both directions.
+func (d *definer) assert(c Constraint) {
+	if x, ok := c.(*Operator); ok {
+		switch x.op {
+		case opAnd:
+			for _, arg := range x.args {
+				d.assert(arg)
+			}
+			return
+		case opOr:
+			clause := make(Clause, 0, len(x.args))
+			for _, arg := range x.args {
+				clause = append(clause, d.define(arg))
+			}
+			d.cnf = append(d.cnf, clause)
+			return
+		}
+	}
+	d.cnf = append(d.cnf, Clause{d.define(c)})
 }
 
 func (d *definer) fresh() *BoolVar {

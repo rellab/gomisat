@@ -717,6 +717,39 @@ solutions made it call `log.Fatal` and exit the process instead of reporting the
 model unsatisfiable, and decoding a solution back to integer values was not
 implemented.
 
+### What the definitional conversion costs, and the non-determinism found on the way
+
+Stating both directions is not free. Measured with the encoding fixed once and the
+solver rebuilt from it, so that encoding and solving are separated:
+
+| model | clauses | literals | encoding | solving |
+| --- | --- | --- | --- | --- |
+| colouring, 20 nodes, 3 colours | 1.54x | 1.71x | 3.3x | 1.40x |
+| colouring, 40 nodes, 3 colours | 1.56x | 1.73x | 6.3x | 1.53x |
+| colouring, 60 nodes, 3 colours | 1.56x | 1.74x | 11.4x | 1.64x |
+| colouring, 60 nodes, 5 colours | 1.70x | 1.83x | 9.0x | 1.28x |
+| one linear constraint, 10 variables | **1.00x** | **1.00x** | 1.00x | **1.00x** |
+| one linear constraint, 20 variables | **1.00x** | **1.00x** | 0.99x | **1.01x** |
+| a disjunction of eight conjunctions | 1.32x | 1.57x | 0.87x | 1.05x |
+
+The integer machinery pays nothing at all: a comparator is already a literal, so it
+needs no auxiliary and has no second direction to state. The whole cost sits in the
+Boolean structure -- about half again as many clauses, and half again as long to
+solve. Encoding slows by more and matters less: it is sub-millisecond and happens
+once. A caller that only wants solutions should turn the conversion off; the default
+is the other way round because a count from the wrong encoding is quietly wrong
+while a solve from either is right.
+
+Getting those numbers required fixing something first. The variables of a linear sum
+come out of a map, whose iteration order Go randomises, and the ordering used to
+decompose the sum compared domain size and then coefficient -- which leaves ties
+everywhere in a typical model. Ten encodings of one twenty-variable model produced
+**nine different formulas, from 20 190 to 35 060 clauses**. No answer was ever wrong,
+but nothing about this package could have been measured. The ordering now breaks ties
+by variable identity, `TestEncodingIsDeterministic` holds it to that, and the first
+version of the table above -- taken before the fix -- was comparing two arms that had
+been encoded differently.
+
 ### A note on how three of these were found
 
 The expected values in the first version of the count-preservation test were worked

@@ -6,7 +6,6 @@ import (
 	_ "errors"
 	_ "fmt"
 	"log"
-	"sort"
 )
 
 func Encode(c Clause, baseCode map[int]int) ([][]int, bool) {
@@ -41,21 +40,7 @@ func (b *BoolNot) encode(codes [][]int, baseCode map[int]int) ([][]int, bool) {
 
 func (c *Comparator) encode(codes [][]int, baseCode map[int]int) ([][]int, bool) {
 	if c.op == CSPOperatorLeZero {
-		vars := make([]*IntVar, 0, len(c.s.coef))
-		for k, _ := range c.s.coef {
-			vars = append(vars, k)
-		}
-		sort.Slice(vars, func(i, j int) bool {
-			s1 := vars[i].domain.size()
-			s2 := vars[j].domain.size()
-			if s1 == s2 {
-				k1 := abs(c.s.coef[vars[i]])
-				k2 := abs(c.s.coef[vars[j]])
-				return k1 > k2
-			} else {
-				return s1 < s2
-			}
-		})
+		vars := sortVars(c.s.coef)
 		if cs, ok := encodeIntVar([][]int{}, make([]int, 0, len(vars)), vars, c.s, -c.s.b, baseCode); ok {
 			// log.Println("encode", cs)
 			switch {

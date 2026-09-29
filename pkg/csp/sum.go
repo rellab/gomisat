@@ -18,7 +18,8 @@ func NewSum(coef map[*IntVar]int, b int) *Sum {
 
 func (s *Sum) String() string {
 	str := "["
-	for k, v := range s.coef {
+	for _, k := range sortVars(s.coef) {
+		v := s.coef[k]
 		str += fmt.Sprintf("+(%d)*%s", v, k.String())
 	}
 	str += fmt.Sprintf("+(%d)]", s.b)
